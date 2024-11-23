@@ -1,164 +1,241 @@
 #!/bin/bash
 
-#This script downloads epg files and merges them into one file.
+set -euo pipefail
 
-## VARIABLES
-BASEPATH="/complete/path/to/folder"
+BASEPATH="$(dirname "$(realpath "$0")")"
+DUMMYFILENAME="xdummy.xml"
+SOURCES_FILE="$BASEPATH/sources.txt"
+DEBUG=${DEBUG:-false}
 
-
-############## variables for dummyEPG creator
-numberofchannels=3
-declare -a a0=("Channel1.us" "Channel Name" "Programme Name" "Programme Description")
-declare -a a1=("Channel2.us" "Channel 2 Name" "Programme 2 Name" "Programme 2 Description")
-declare -a a2=("Channel3.us" "Channel 3 Name" "Programme 3 Name" "Programme 3 Description")
 starttimes=("000000" "060000" "120000" "180000")
 endtimes=("060000" "120000" "180000" "235900")
-DUMMYFILENAME=xdummy.xml
 
-LISTS=(
-"http://link.to.list.1" 
-"https://link.to.list.2.xml.gz"
-"http://link.to.list.3.gz"
-)
+generated_files=()
+
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $@"
+}
+
+cleanup() {
+    log "Cleaning up temporary files..."
+    for file in "${generated_files[@]}"; do
+        log "Deleting $file..."
+        rm -f "$file"
+    done
+    generated_files=()
+}
+
+trap cleanup EXIT
+
+show_help() {
+    cat << EOF
+Usage: $(basename "$0") [OPTION]
+
+This script generates, downloads, processes, and merges EPG (Electronic Program Guide) XML files.
+
+Options:
+  --help         Show this help message and exit.
+  -dummy         Generate EPG channels using dummy_channels.txt.
+
+Files:
+  - sources: File containing the list of EPG sources (URLs or file paths), located in the same directory as the script.
+  - dummy_channels: File containing dummy channel definitions, located in the same directory as the script.
+
+Environment Variables:
+  - DEBUG=true   Enable debug logging.
+
+Dependencies:
+  Ensure the following commands are installed: wget, tv_sort, tv_merge, gunzip, sed.
+EOF
+    exit 0
+}
+
+check_dependencies() {
+    for cmd in wget tv_sort tv_merge gunzip sed; do
+        if ! command -v $cmd &>/dev/null; then
+            echo "Error: $cmd is not installed. Please install it and try again."
+            exit 1
+        fi
+    done
+}
+
+if [ ! -f "$SOURCES_FILE" ]; then
+    echo "Error: Sources file not found at $SOURCES_FILE."
+    exit 1
+fi
+
+LISTS=()
+while IFS= read -r line || [ -n "$line" ]; do
+    LISTS+=("$line")
+done < "$SOURCES_FILE"
 
 dummycreator() {
-		today=$(date +%Y%m%d)
-		tomorrow=$(date --date="+1 day" +%Y%m%d)
-        numberofiterations=$(($numberofchannels - 1))
-		echo '<?xml version="1.0" encoding="UTF-8"?>' > $BASEPATH/$DUMMYFILENAME
-		echo '<tv generator-info-name="dummy" generator-info-url="https://dummy.com/">' >> $BASEPATH/$DUMMYFILENAME
+    local DUMMY_CHANNELS_FILE="$BASEPATH/dummy_channels.txt"
 
+    today=$(date +%Y%m%d)
+    tomorrow=$(date --date="+1 day" +%Y%m%d)
 
-		for i in $(seq 0 $numberofiterations) ;do # Number of Dummys -1 
-			tvgid=a$i[0]
-			name=a$i[1]
-			echo '    <channel id="'${!tvgid}'">' >> $BASEPATH/$DUMMYFILENAME
-			echo '        <display-name lang="pt">'${!name}'</display-name>' >> $BASEPATH/$DUMMYFILENAME
-			echo '    </channel>' >> $BASEPATH/$DUMMYFILENAME
-		done
+    if [ ! -f "$DUMMY_CHANNELS_FILE" ]; then
+        echo "Error: Dummy channels file not found at $DUMMY_CHANNELS_FILE."
+        exit 1
+    fi
 
-		for i in $(seq 0 $numberofiterations) ;do
-			tvgid=a$i[0]
-			title=a$i[2]
-			desc=a$i[3]
-			for j in {0..3}; do
-					echo '    <programme start="'$today${starttimes[$j]}' +0000" stop="'$today${endtimes[$j]}' +0000" channel="'${!tvgid}'">' >> $BASEPATH/$DUMMYFILENAME
-					echo '        <title lang="pt">'${!title}'</title>' >> $BASEPATH/$DUMMYFILENAME
-					echo '        <desc lang="pt">'${!desc}'</desc>' >> $BASEPATH/$DUMMYFILENAME
-					echo '    </programme>' >> $BASEPATH/$DUMMYFILENAME
-			done
-			for j in {0..3}; do
-					echo '    <programme start="'$tomorrow${starttimes[$j]}' +0000" stop="'$tomorrow${endtimes[$j]}' +0000" channel="'${!tvgid}'">' >> $BASEPATH/$DUMMYFILENAME
-					echo '        <title lang="pt">'${!title}'</title>' >> $BASEPATH/$DUMMYFILENAME
-					echo '        <desc lang="pt">'${!desc}'</desc>' >> $BASEPATH/$DUMMYFILENAME
-					echo '    </programme>' >> $BASEPATH/$DUMMYFILENAME
-			done
-		done
+    local numberofchannels
+    numberofchannels=$(grep -v '^#' "$DUMMY_CHANNELS_FILE" | wc -l)
 
-		echo '</tv>' >> $BASEPATH/$DUMMYFILENAME
+    if [ "$numberofchannels" -eq 0 ]; then
+        echo "Error: Dummy channels file is empty or contains only comments. Please add at least one channel."
+        exit 1
+    fi
+
+    log "Generating dummy EPG for $numberofchannels channels..."
+
+    {
+        echo '<?xml version="1.0" encoding="UTF-8"?>'
+        echo '<tv generator-info-name="dummy" generator-info-url="https://dummy.com/">'
+
+        while IFS='|' read -r tvgid name title desc; do
+            [[ "$tvgid" == \#* ]] && continue
+
+            echo "    <channel id=\"$tvgid\">"
+            echo "        <display-name lang=\"de\">$name</display-name>"
+            echo "    </channel>"
+
+            for j in {0..3}; do
+                echo "    <programme start=\"$today${starttimes[$j]} +0000\" stop=\"$today${endtimes[$j]} +0000\" channel=\"$tvgid\">"
+                echo "        <title lang=\"de\">$title</title>"
+                echo "        <desc lang=\"de\">$desc</desc>"
+                echo "    </programme>"
+            done
+
+            for j in {0..3}; do
+                echo "    <programme start=\"$tomorrow${starttimes[$j]} +0000\" stop=\"$tomorrow${endtimes[$j]} +0000\" channel=\"$tvgid\">"
+                echo "        <title lang=\"de\">$title</title>"
+                echo "        <desc lang=\"de\">$desc</desc>"
+                echo "    </programme>"
+            done
+        done < "$DUMMY_CHANNELS_FILE"
+
+        echo '</tv>'
+    } >"$BASEPATH/$DUMMYFILENAME"
+
+    generated_files+=("$BASEPATH/$DUMMYFILENAME")
 }
 
-fixall () {
-	for xml in $BASEPATH/*.xml; do
-		echo "Fixing $xml ... "
-		sleep 1
-		## Structural Fixes
-		sed -i "/<url>/d" "$xml"
-		sed -i "s/lang=\"\"/lang=\"pt-BR\"/g" $xml
-		## Language Fixes (Might Not be Necessary)
-		sed -i "s/<display-name>/<display-name lang=\"pt-BR\">/g" $xml
-		sed -i "s/lang=\"pt\"/lang=\"pt-BR\"/g" $xml
-
-	done	
+fixall() {
+    for xml in "${generated_files[@]}"; do
+        log "Fixing $xml..."
+        sed -i "/<url>/d" "$xml"
+        sed -i "s/lang=\"\"/lang=\"de\"/g" "$xml"
+        sed -i "s/<display-name>/<display-name lang=\"de\">/g" "$xml"
+    done
 }
 
-
-
-downloadepgs () {
-	INDEX=1
-	for list in ${LISTS[*]}; do
-		sleep 1
-		dir="$(TMPDIR=$PWD mktemp -d)" ## makes a temp dir so that we can download the file, rename it and keep it's extention.
-		wget -q --show-progress -P $dir --content-disposition --trust-server-names ${list[*]}
-		regex="\?"
-		for file in $dir/*; do
-			if [[ $file =~ $regex ]]; 
-				then
-					ext="xml"
-				else
-					echo "Not!"
-					ext=${file##*.}
-			fi
-			echo  "Extention = " $ext " Will rename it to " $BASEPATH/$INDEX.$ext
-			mv $file $BASEPATH/$INDEX.$ext
-		done
-		rmdir "$dir"
-		let INDEX=${INDEX}+1
-	done
+downloadepgs() {
+    local INDEX=1
+    for list in "${LISTS[@]}"; do
+        if [[ $list == http* ]]; then
+            log "Downloading $list..."
+            local dir
+            dir="$(mktemp -d)"
+            wget -q --show-progress -P "$dir" --content-disposition --trust-server-names "$list"
+            for file in "$dir"/*; do
+                ext=${file##*.}
+                mv "$file" "$BASEPATH/$INDEX.$ext"
+                generated_files+=("$BASEPATH/$INDEX.$ext")
+            done
+            rmdir "$dir"
+        else
+            log "Processing local file $list..."
+            cp "$list" "$BASEPATH/$INDEX.xml"
+            generated_files+=("$BASEPATH/$INDEX.xml")
+        fi
+        ((INDEX++))
+    done
 }
 
-
-
-extractgz () {
-	echo "Extracting compressed files..."
-	gunzip -f $BASEPATH/*.gz
-	find . -type f  ! -name "*.*" -exec mv {} {}.xml \;
-	sleep 2
-	## workarround to fix unknown bug that causes the .xml extention not to be added to some files some times.
-	INDEX=1
-	for list in ${LISTS[*]}; do
-		mv $BASEPATH/$INDEX $BASEPATH/$INDEX.xml
-		let INDEX=${INDEX}+1
-	done
-
+extractgz() {
+    log "Extracting compressed files..."
+    if ls "$BASEPATH"/*.gz 1>/dev/null 2>&1; then
+        gunzip -f "$BASEPATH"/*.gz
+    else
+        log "No compressed files found to extract."
+    fi
 }
 
-sortall () {
-	for xml in $BASEPATH/*.xml; do
-		echo "Sorting $xml ..."
-		sleep 1
-		tv_sort --by-channel --output $xml $xml		
-	done
+sortall() {
+    for xml in "${generated_files[@]}"; do
+        log "Sorting $xml..."
+        tv_sort --by-channel --output "$xml" "$xml"
+    done
 }
 
-mergeall () {
-	fileslist=( $(ls $BASEPATH/*.xml) )
-	
-	# MERGE The First 2
-	echo "Merging ${fileslist[0]} with ${fileslist[1]}"
-	tv_merge -i ${fileslist[0]} -m ${fileslist[1]} -o $BASEPATH/merged.xmltv
-	
-	#Merge the Rest
-	for i in $(seq 2 ${#fileslist[@]}); do
-		if [ ! -z "${fileslist[$i]}" ]; then
-			echo "Merging ${fileslist[$i]} ... "
-		fi
-		tv_merge -i $BASEPATH/merged.xmltv -m ${fileslist[$i]} -o $BASEPATH/merged.xmltv
-	done
+mergeall() {
+    if [ ${#generated_files[@]} -lt 2 ]; then
+        echo "Error: Not enough XML files to merge."
+        return
+    fi
+
+    log "Merging ${generated_files[0]} with ${generated_files[1]}..."
+    tv_merge -i "${generated_files[0]}" -m "${generated_files[1]}" -o "$BASEPATH/merged.xmltv" || {
+        echo "Error: Failed to merge files."
+        return
+    }
+
+    for xml in "${generated_files[@]:2}"; do
+        log "Merging $xml..."
+        tv_merge -i "$BASEPATH/merged.xmltv" -m "$xml" -o "$BASEPATH/merged.xmltv" || {
+            echo "Error: Failed to merge $xml."
+            return
+        }
+    done
 }
 
-
-getall () {
-dummycreator
-downloadepgs
-extractgz
+cleanup() {
+    log "Cleaning up temporary files..."
+    for file in "${generated_files[@]}"; do
+        log "Deleting $file..."
+        rm -f "$file"
+    done
+    generated_files=()
 }
 
-getall
+backup_existing_merged() {
+    local backup_file="$BASEPATH/merged_backup.xmltv"
 
-fixall
+    if [ -f "$backup_file" ]; then
+        log "Deleting existing backup file $backup_file..."
+        rm -f "$backup_file"
+    fi
 
-sortall
+    if [ -f "$BASEPATH/merged.xmltv" ]; then
+        log "Creating a new backup for merged.xmltv..."
+        mv "$BASEPATH/merged.xmltv" "$backup_file"
+    else
+        log "No existing merged.xmltv to back up."
+    fi
+}
 
-##Remove old file
-rm -f $BASEPATH/merged.xmltv
+main() {
+    if [[ "${1:-}" == "--help" ]]; then
+        show_help
+    fi
 
-## Merge All the xml files into merged.xmltv
-mergeall
+    log "Starting EPG processing script..."
+    check_dependencies
+    backup_existing_merged
 
-## Cleanup
-echo "Cleaning Up..."
-rm $BASEPATH/*.xml
+    if [[ "${1:-}" == "-dummy" ]]; then
+        dummycreator
+    fi
 
-echo "Done!"
-sleep 3
+    downloadepgs
+    extractgz
+    fixall
+    sortall
+    mergeall
+    cleanup
+    log "EPG processing complete!"
+}
+
+main "$@"

@@ -1,18 +1,43 @@
-## XML EPG MERGER
+# epgxml-merge-dummy
 
-Bash Script that runs on Linux to merge 2 or more xml epg files.
-Also supports creation of dummy epg into the merge.
+The epgmerger.sh script is designed to process, merge, and manage Electronic Program Guide (EPG) XML files.
+It automates tasks such as downloading EPG files, generating dummy EPG entries, sorting, merging, and cleaning up temporary files.
 
-**Requires XMLTV installed**
+**Requirements**
 ```
-sudo apt install xmltv
+sudo apt install wget xmltv gzip sed 
 ```
 
-## How To Use
-* Fill in the variables with the links to the lists that you want to merge.
-* Script supports direct xml or compacted .gz files.
-* Execute the script (manually or as a cron, to automate it).
-* Output file will be called "merged.xmltv"
-* xml lists further down on the list will replace any previous ones in case of overlaping programmes. So, the most complete (or reliable) list should always be on the bottom of the list.
-* If you dont want to generate a dummy, simply comment out line 135
-* For a better understanding of the dummy epg, see [this repo](https://github.com/yurividal/dummyepgxml).
+## Features
+
+- EPG File Management:
+  - Download EPG files from URLs or process local files specified in sources.txt
+  - Extract and process compressed .gz EPG files
+  - Automatically sort and merge multiple EPG files
+- Dummy EPG Creation:
+  - Generate a dummy EPG using channel definitions from dummy_channels.txt (optional with -dummy flag)
+
+## Running the Script
+
+```
+./epg_merge.sh [OPTION]
+```
+
+Options
+
+-dummy: Generate dummy EPG using dummy_channels.txt  
+--help: Show help information
+
+## File Structure
+
+- sources.txt: List of EPG file sources (URLs or local file paths)
+- dummy_channels.txt: Definitions for dummy EPG channels and programs
+- merged.xmltv: The final merged EPG file
+- merged_backup.xmltv: Backup of the most recent merged EPG
+
+## 
+
+This script combines two repos from yurividal
+
+- [mergexmlepg](https://github.com/yurividal/mergexmlepg)
+- [dummyepgxml](https://github.com/yurividal/dummyepgxml)

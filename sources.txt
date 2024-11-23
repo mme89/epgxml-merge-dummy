@@ -1,0 +1,13 @@
+# Example EPG Sources
+# Lines starting with '#' are comments and will be ignored by the script.
+
+# Remote XMLTV files (URLs)
+http://example.com/epg1.xml
+http://example.com/epg2.xml
+
+# Compressed remote XMLTV file
+http://example.com/epg3.xml.gz
+
+# Local XMLTV files
+/home/user/epg_files/local_epg1.xml
+/home/user/epg_files/local_epg2.xml

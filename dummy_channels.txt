@@ -1,0 +1,30 @@
+# Dummy Channels Example
+# This file defines dummy channels for generating EPG data.
+# Lines starting with '#' are comments and will be ignored by the script.
+# Format: channel-id|channel-name|program-title|program-description
+# Ensure there is an empty line at the end of this file.
+
+# Sports Channels
+ChannelSport1|Sports Channel 1|Sports Event|Creative Program Description
+ChannelSport2|Sports Channel 2|Sports Highlights|Creative Program Description
+ChannelSport3|Sports Channel 3|Live Match|Creative Program Description
+
+# News Channels
+ChannelNews1|News Channel 1|Morning News|Creative Program Description
+ChannelNews2|News Channel 2|World Headlines|Creative Program Description
+ChannelNews3|News Channel 3|Breaking News|Creative Program Description
+
+# Entertainment Channels
+ChannelEnt1|Entertainment Channel 1|Movie Night|Creative Program Description
+ChannelEnt2|Entertainment Channel 2|Reality Show|Creative Program Description
+ChannelEnt3|Entertainment Channel 3|Talk Show|Creative Program Description
+
+# Documentaries
+ChannelDoc1|Documentary Channel 1|Nature Documentary|Creative Program Description
+ChannelDoc2|Documentary Channel 2|Science Documentary|Creative Program Description
+
+# Kids Channels
+ChannelKids1|Kids Channel 1|Cartoon Show|Creative Program Description
+ChannelKids2|Kids Channel 2|Adventure Series|Creative Program Description
+
+# Remember: Add an empty line at the end of the file
