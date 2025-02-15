@@ -1,0 +1,12 @@
+# filter_epg_patterns.txt
+# Patterns to remove from merged EPG XML files.
+# Each non-comment, non-empty line will be used as a pattern to remove unwanted text.
+
+# Remove the literal substring "(lang=)"
+(lang=)
+
+# Remove stray closing parentheses that might appear in <desc> or <title> tags
+)
+
+# Example: Remove the word "dummy" if it appears in titles or descriptions.
+dummy

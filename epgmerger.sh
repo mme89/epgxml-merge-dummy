@@ -3,6 +3,9 @@
 set -euo pipefail
 
 BASEPATH="$(dirname "$(realpath "$0")")"
+LOGFILE="${LOGFILE:-$BASEPATH/epgmerger.log}"
+exec > "$LOGFILE" 2>&1
+
 DUMMYFILENAME="xdummy.xml"
 SOURCES_FILE="$BASEPATH/sources.txt"
 DEBUG=${DEBUG:-false}
@@ -13,7 +16,9 @@ endtimes=("060000" "120000" "180000" "235900")
 generated_files=()
 
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $@"
+    local message
+    message="$(date '+%Y-%m-%d %H:%M:%S') - $@"
+    echo "$message" | tee -a "$LOGFILE"
 }
 
 cleanup() {
@@ -43,16 +48,14 @@ Files:
 
 Environment Variables:
   - DEBUG=true   Enable debug logging.
-
-Dependencies:
-  Ensure the following commands are installed: wget, tv_sort, tv_merge, gunzip, sed.
+  - LOGFILE      Specify a custom log file location. Defaults to the script's folder.
 EOF
     exit 0
 }
 
 check_dependencies() {
     for cmd in wget tv_sort tv_merge gunzip sed; do
-        if ! command -v $cmd &>/dev/null; then
+        if ! command -v "$cmd" &>/dev/null; then
             echo "Error: $cmd is not installed. Please install it and try again."
             exit 1
         fi
@@ -66,6 +69,8 @@ fi
 
 LISTS=()
 while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [ -z "$line" ] && continue
     LISTS+=("$line")
 done < "$SOURCES_FILE"
 
@@ -189,15 +194,27 @@ mergeall() {
             return
         }
     done
+
+    filter_merged
 }
 
-cleanup() {
-    log "Cleaning up temporary files..."
-    for file in "${generated_files[@]}"; do
-        log "Deleting $file..."
-        rm -f "$file"
-    done
-    generated_files=()
+filter_merged() {
+    local PATTERNS_FILE="$BASEPATH/filter_epg_patterns.txt"
+    if [ ! -f "$PATTERNS_FILE" ]; then
+         log "No filter patterns file found at $PATTERNS_FILE. Skipping filtering of merged file."
+         return
+    fi
+
+    if [ -f "$BASEPATH/merged.xmltv" ]; then
+        log "Filtering merged.xmltv using patterns from $PATTERNS_FILE..."
+        while IFS= read -r pattern || [ -n "$pattern" ]; do
+             [[ "$pattern" =~ ^[[:space:]]*# ]] && continue
+             [ -z "$pattern" ] && continue
+             log "Removing pattern: $pattern"
+             sed -i "/<title/ s|$pattern||g" "$BASEPATH/merged.xmltv"
+             sed -i "/<desc/ s|$pattern||g" "$BASEPATH/merged.xmltv"
+        done < "$PATTERNS_FILE"
+    fi
 }
 
 backup_existing_merged() {
