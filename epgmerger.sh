@@ -162,6 +162,11 @@ downloadepgs() {
 extractgz() {
     log "Extracting compressed files..."
     if ls "$BASEPATH"/*.gz 1>/dev/null 2>&1; then
+        for i in "${!generated_files[@]}"; do
+            if [[ "${generated_files[$i]}" == *.gz ]]; then
+                generated_files[$i]="${generated_files[$i]%.gz}"
+            fi
+        done
         gunzip -f "$BASEPATH"/*.gz
     else
         log "No compressed files found to extract."
