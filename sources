@@ -1,0 +1,22 @@
+# =============================================================================
+# EPG SOURCES CONFIGURATION
+# =============================================================================
+# This file defines EPG sources (URLs or file paths) to be downloaded and merged.
+# These sources will be processed when running epgmerger.sh.
+#
+# FORMAT: Each line should contain a URL or file path to an XMLTV file
+#         URLs must start with http:// or https://
+#
+# Lines starting with '#' are comments and will be ignored by the script.
+# =============================================================================
+
+# Remote XMLTV files (URLs)
+#http://example.com/epg1.xml
+#http://example.com/epg2.xml
+
+# Compressed remote XMLTV file
+#http://example.com/epg3.xml.gz
+
+# Local XMLTV files
+#/home/user/epg_files/local_epg1.xml
+#/home/user/epg_files/local_epg2.xml

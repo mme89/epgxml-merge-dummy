@@ -11,29 +11,42 @@ sudo apt install wget xmltv gzip sed
 ## Features
 
 - EPG File Management:
-  - Download EPG files from URLs or process local files specified in sources.txt
+  - Download EPG files from URLs or process local files specified in sources
   - Extract and process compressed .gz EPG files
   - Automatically sort and merge multiple EPG files
 - Dummy EPG Creation:
-  - Generate a dummy EPG using channel definitions from dummy_channels.txt (optional with -dummy flag)
+  - Generate a dummy EPG using channel definitions from dummy_channels (optional with -dummy flag)
+- Filter EPG Entries:
+  - Apply filtering to the merged EPG file using patterns from filter_epg_patterns (optional with -filter flag)
+- Logging:
+  - Log output is displayed in the terminal and written to a log file simultaneously
+  - Custom log file location can be specified with the LOGFILE environment variable
 
 ## Running the Script
 
 ```
-./epg_merge.sh [OPTION]
+./epgmerger.sh [OPTION]
 ```
 
-Options
+## Options
 
--dummy: Generate dummy EPG using dummy_channels.txt  
---help: Show help information
+- `-dummy`: Generate dummy EPG using dummy_channels
+- `-filter`: Apply filtering to the merged EPG file using patterns from filter_epg_patterns
+- `--help`: Show help information
+
+## Environment Variables
+
+- `DEBUG=true`: Enable debug logging
+- `LOGFILE`: Specify a custom log file location (defaults to the script directory)
 
 ## File Structure
 
-- sources.txt: List of EPG file sources (URLs or local file paths)
-- dummy_channels.txt: Definitions for dummy EPG channels and programs
-- merged.xmltv: The final merged EPG file
-- merged_backup.xmltv: Backup of the most recent merged EPG
+- `sources`: List of EPG file sources (URLs or local file paths)
+- `dummy_channels`: Definitions for dummy EPG channels and programs
+- `filter_epg_patterns`: Patterns to filter out from the merged EPG file
+- `merged.xmltv`: The final merged EPG file
+- `merged_backup.xmltv`: Backup of the most recent merged EPG
+- `epgmerger.log`: Default log file (unless specified otherwise)
 
 ## 
 

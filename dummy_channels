@@ -1,8 +1,14 @@
-# Dummy Channels Example
+# =============================================================================
+# DUMMY CHANNELS CONFIGURATION
+# =============================================================================
 # This file defines dummy channels for generating EPG data.
+# These channels will be used when running epgmerger.sh with the -dummy flag.
+#
+# FORMAT: channel-id|channel-name|program-title|program-description
+#
 # Lines starting with '#' are comments and will be ignored by the script.
-# Format: channel-id|channel-name|program-title|program-description
 # Ensure there is an empty line at the end of this file.
+# =============================================================================
 
 # Sports Channels
 #ChannelSport1|Sports Channel 1|Sports Event|Creative Program Description

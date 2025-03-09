@@ -4,10 +4,9 @@ set -euo pipefail
 
 BASEPATH="$(dirname "$(realpath "$0")")"
 LOGFILE="${LOGFILE:-$BASEPATH/epgmerger.log}"
-exec > "$LOGFILE" 2>&1
 
 DUMMYFILENAME="xdummy.xml"
-SOURCES_FILE="$BASEPATH/sources.txt"
+SOURCES_FILE="$BASEPATH/sources"
 DEBUG=${DEBUG:-false}
 
 starttimes=("000000" "060000" "120000" "180000")
@@ -40,16 +39,19 @@ This script generates, downloads, processes, and merges EPG (Electronic Program 
 
 Options:
   --help         Show this help message and exit.
-  -dummy         Generate EPG channels using dummy_channels.txt.
+  -dummy         Generate EPG channels using dummy_channels.
+  -filter        Apply filtering to the merged EPG file using patterns from filter_epg_patterns.
 
 Files:
   - sources: File containing the list of EPG sources (URLs or file paths), located in the same directory as the script.
   - dummy_channels: File containing dummy channel definitions, located in the same directory as the script.
+  - filter_epg_patterns: File containing patterns to filter out from the merged EPG file.
 
 Environment Variables:
   - DEBUG=true   Enable debug logging.
   - LOGFILE      Specify a custom log file location. Defaults to the script's folder.
 EOF
+    trap - EXIT
     exit 0
 }
 
@@ -75,7 +77,7 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < "$SOURCES_FILE"
 
 dummycreator() {
-    local DUMMY_CHANNELS_FILE="$BASEPATH/dummy_channels.txt"
+    local DUMMY_CHANNELS_FILE="$BASEPATH/dummy_channels"
 
     today=$(date +%Y%m%d)
     tomorrow=$(date --date="+1 day" +%Y%m%d)
@@ -86,7 +88,7 @@ dummycreator() {
     fi
 
     local numberofchannels
-    numberofchannels=$(grep -v '^#' "$DUMMY_CHANNELS_FILE" | wc -l)
+    numberofchannels=$(grep -v '^[[:space:]]*#' "$DUMMY_CHANNELS_FILE" | grep -v '^[[:space:]]*$' | wc -l)
 
     if [ "$numberofchannels" -eq 0 ]; then
         echo "Error: Dummy channels file is empty or contains only comments. Please add at least one channel."
@@ -100,7 +102,8 @@ dummycreator() {
         echo '<tv generator-info-name="dummy" generator-info-url="https://dummy.com/">'
 
         while IFS='|' read -r tvgid name title desc; do
-            [[ "$tvgid" == \#* ]] && continue
+            [[ "$tvgid" =~ ^[[:space:]]*# ]] && continue
+            [ -z "$tvgid" ] && continue
 
             echo "    <channel id=\"$tvgid\">"
             echo "        <display-name lang=\"de\">$name</display-name>"
@@ -199,12 +202,10 @@ mergeall() {
             return
         }
     done
-
-    filter_merged
 }
 
 filter_merged() {
-    local PATTERNS_FILE="$BASEPATH/filter_epg_patterns.txt"
+    local PATTERNS_FILE="$BASEPATH/filter_epg_patterns"
     if [ ! -f "$PATTERNS_FILE" ]; then
          log "No filter patterns file found at $PATTERNS_FILE. Skipping filtering of merged file."
          return
@@ -239,15 +240,27 @@ backup_existing_merged() {
 }
 
 main() {
-    if [[ "${1:-}" == "--help" ]]; then
-        show_help
-    fi
+    local FILTER=false
+    
+    for arg in "$@"; do
+        case $arg in
+            --help)
+                show_help
+                ;;
+            -dummy)
+                DUMMY=true
+                ;;
+            -filter)
+                FILTER=true
+                ;;
+        esac
+    done
 
     log "Starting EPG processing script..."
     check_dependencies
     backup_existing_merged
 
-    if [[ "${1:-}" == "-dummy" ]]; then
+    if [[ "${DUMMY:-false}" == true ]]; then
         dummycreator
     fi
 
@@ -256,6 +269,11 @@ main() {
     fixall
     sortall
     mergeall
+    
+    if [[ "$FILTER" == true ]]; then
+        filter_merged
+    fi
+    
     cleanup
     log "EPG processing complete!"
 }

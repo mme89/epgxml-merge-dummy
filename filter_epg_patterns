@@ -1,0 +1,20 @@
+# =============================================================================
+# FILTER PATTERNS CONFIGURATION
+# =============================================================================
+# This file defines patterns to filter out from the merged EPG file.
+# These patterns will be applied when running epgmerger.sh with the -filter flag.
+#
+# FORMAT: Each non-comment, non-empty line will be used as a pattern to remove 
+#         unwanted text from <title> and <desc> tags in the merged EPG.
+#
+# Lines starting with '#' are comments and will be ignored by the script.
+# =============================================================================
+
+# Remove the literal substring "(lang=)" 
+#(lang=)
+
+# Remove stray closing parentheses that might appear in <desc> or <title> tags
+#)
+
+# Example: Remove the word "dummy" if it appears in titles or descriptions
+#dummy
