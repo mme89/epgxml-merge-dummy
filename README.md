@@ -5,7 +5,7 @@ It automates tasks such as downloading EPG files, generating dummy EPG entries, 
 
 **Requirements**
 ```
-sudo apt install wget xmltv gzip sed 
+sudo apt install wget xmltv gzip sed awk
 ```
 
 ## Features
@@ -18,6 +18,8 @@ sudo apt install wget xmltv gzip sed
   - Generate a dummy EPG using channel definitions from dummy_channels (optional with -dummy flag)
 - Filter EPG Entries:
   - Apply filtering to the merged EPG file using patterns from filter_epg_patterns (optional with -filter flag)
+- Cutoff Date Filtering:
+  - Remove EPG entries starting after a specific date (optional with -cutoff-date or -cutoff-days flags)
 - Logging:
   - Log output is displayed in the terminal and written to a log file simultaneously
   - Custom log file location can be specified with the LOGFILE environment variable
@@ -32,6 +34,8 @@ sudo apt install wget xmltv gzip sed
 
 - `-dummy`: Generate dummy EPG using dummy_channels
 - `-filter`: Apply filtering to the merged EPG file using patterns from filter_epg_patterns
+- `-cutoff-date YYYYMMDD`: Remove programme entries starting after this date (e.g., 20241231). Cannot be used with -cutoff-days.
+- `-cutoff-days N`: Remove programme entries starting N days after today. Cannot be used with -cutoff-date.
 - `--help`: Show help information
 
 ## Environment Variables

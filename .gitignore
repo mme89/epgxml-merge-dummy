@@ -1,0 +1,43 @@
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime*
+.project
+.settings/
+
+# Log files
+*.log
+logs/
+epgmerger.log
+
+# EPG generated files
+merged.xmltv
+merged_backup.xmltv
+xdummy.xml
+*.xml
+*.gz
+[0-9].*
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+.*.swp
+
+# Shell script related
+.bash_history
+
+# Environment variables
+.env

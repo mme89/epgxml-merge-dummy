@@ -41,6 +41,12 @@ Options:
   --help         Show this help message and exit.
   -dummy         Generate EPG channels using dummy_channels.
   -filter        Apply filtering to the merged EPG file using patterns from filter_epg_patterns.
+  -cutoff-date YYYYMMDD
+                 Remove programme entries starting after this date (e.g., 20241231).
+                 Cannot be used with -cutoff-days.
+  -cutoff-days N
+                 Remove programme entries starting N days after today.
+                 Cannot be used with -cutoff-date.
 
 Files:
   - sources: File containing the list of EPG sources (URLs or file paths), located in the same directory as the script.
@@ -56,7 +62,7 @@ EOF
 }
 
 check_dependencies() {
-    for cmd in wget tv_sort tv_merge gunzip sed; do
+    for cmd in wget tv_sort tv_merge gunzip sed awk; do
         if ! command -v "$cmd" &>/dev/null; then
             echo "Error: $cmd is not installed. Please install it and try again."
             exit 1
@@ -206,20 +212,80 @@ mergeall() {
 
 filter_merged() {
     local PATTERNS_FILE="$BASEPATH/filter_epg_patterns"
+    local MERGED_FILE="$BASEPATH/merged.xmltv"
     if [ ! -f "$PATTERNS_FILE" ]; then
          log "No filter patterns file found at $PATTERNS_FILE. Skipping filtering of merged file."
          return
     fi
 
-    if [ -f "$BASEPATH/merged.xmltv" ]; then
-        log "Filtering merged.xmltv using patterns from $PATTERNS_FILE..."
+    if [ -f "$MERGED_FILE" ]; then
+        log "Filtering $MERGED_FILE using patterns from $PATTERNS_FILE..."
         while IFS= read -r pattern || [ -n "$pattern" ]; do
              [[ "$pattern" =~ ^[[:space:]]*# ]] && continue
              [ -z "$pattern" ] && continue
              log "Removing pattern: $pattern"
-             sed -i "/<title/ s|$pattern||g" "$BASEPATH/merged.xmltv"
-             sed -i "/<desc/ s|$pattern||g" "$BASEPATH/merged.xmltv"
+             sed -i "/<title/ s|$pattern||g" "$MERGED_FILE"
+             sed -i "/<desc/ s|$pattern||g" "$MERGED_FILE"
         done < "$PATTERNS_FILE"
+    else
+      log "Merged file $MERGED_FILE not found for filtering."
+    fi
+}
+
+filter_by_cutoff_date() {
+    local cutoff_date="$1"
+    local MERGED_FILE="$BASEPATH/merged.xmltv"
+    local TEMP_FILE="$BASEPATH/merged.temp.xmltv"
+
+    if [ ! -f "$MERGED_FILE" ]; then
+        log "Merged file $MERGED_FILE not found for cutoff date filtering."
+        return
+    fi
+
+    log "Applying cutoff date $cutoff_date to $MERGED_FILE..."
+
+    awk -v cutoff="$cutoff_date" '
+    BEGIN { in_prog = 0; keep_prog = 1; buffer = ""; }
+    /<programme / {
+        in_prog = 1;
+        start_attr_line = $0;
+        match(start_attr_line, /start="([0-9]{8})/);
+        start_date = substr(start_attr_line, RSTART + 7, 8);
+
+        if (start_date > cutoff) {
+            keep_prog = 0;
+            buffer = "";
+        } else {
+            keep_prog = 1;
+            buffer = $0 ORS;
+        }
+        next;
+    }
+    /<\/programme>/ {
+        if (in_prog && keep_prog) {
+            buffer = buffer $0 ORS;
+            printf "%s", buffer;
+        }
+        in_prog = 0;
+        keep_prog = 1;
+        buffer = "";
+        next;
+    }
+    {
+        if (in_prog && keep_prog) {
+            buffer = buffer $0 ORS;
+        } else if (!in_prog) {
+            print $0;
+        }
+    }
+    ' "$MERGED_FILE" > "$TEMP_FILE"
+
+    if [ -s "$TEMP_FILE" ]; then
+        mv "$TEMP_FILE" "$MERGED_FILE"
+        log "Cutoff date filtering complete."
+    else
+        log "Error: awk filtering produced an empty file. Original file kept."
+        rm -f "$TEMP_FILE"
     fi
 }
 
@@ -241,26 +307,81 @@ backup_existing_merged() {
 
 main() {
     local FILTER=false
-    
-    for arg in "$@"; do
-        case $arg in
+    local DUMMY=false
+    local CUTOFF_DATE=""
+    local CUTOFF_DAYS=""
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
             --help)
                 show_help
                 ;;
             -dummy)
                 DUMMY=true
+                shift
                 ;;
             -filter)
                 FILTER=true
+                shift
+                ;;
+            -cutoff-date)
+                if [[ -n "$CUTOFF_DAYS" ]]; then
+                    echo "Error: Cannot use -cutoff-date and -cutoff-days together." >&2
+                    exit 1
+                fi
+                if [[ -n "$2" && "$2" =~ ^[0-9]{8}$ ]]; then
+                    CUTOFF_DATE="$2"
+                    shift
+                    shift
+                else
+                    echo "Error: -cutoff-date requires a date in YYYYMMDD format." >&2
+                    exit 1
+                fi
+                ;;
+            -cutoff-days)
+                if [[ -n "$CUTOFF_DATE" ]]; then
+                     echo "Error: Cannot use -cutoff-date and -cutoff-days together." >&2
+                     exit 1
+                fi
+                if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                    CUTOFF_DAYS="$2"
+                    shift
+                    shift
+                else
+                    echo "Error: -cutoff-days requires a positive integer number of days." >&2
+                    exit 1
+                fi
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                show_help
                 ;;
         esac
     done
+
+    # Calculate CUTOFF_DATE if CUTOFF_DAYS was provided
+    if [[ -n "$CUTOFF_DAYS" ]]; then
+        # Check if date command supports --date (GNU date)
+        if date --version >/dev/null 2>&1 ; then
+             CUTOFF_DATE=$(date --date="+${CUTOFF_DAYS} days" +%Y%m%d)
+        else
+             # Attempt BSD date syntax (e.g., macOS)
+             if date -v+${CUTOFF_DAYS}d +%Y%m%d >/dev/null 2>&1 ; then
+                 CUTOFF_DATE=$(date -v+${CUTOFF_DAYS}d +%Y%m%d)
+             else
+                 echo "Error: Cannot determine correct syntax for date command to calculate future date." >&2
+                 exit 1
+             fi
+        fi
+        log "Calculated cutoff date: $CUTOFF_DATE (${CUTOFF_DAYS} days from today)"
+    fi
+
 
     log "Starting EPG processing script..."
     check_dependencies
     backup_existing_merged
 
-    if [[ "${DUMMY:-false}" == true ]]; then
+    if [[ "$DUMMY" == true ]]; then
         dummycreator
     fi
 
@@ -269,11 +390,15 @@ main() {
     fixall
     sortall
     mergeall
-    
+
     if [[ "$FILTER" == true ]]; then
         filter_merged
     fi
-    
+
+    if [[ -n "$CUTOFF_DATE" ]]; then
+        filter_by_cutoff_date "$CUTOFF_DATE"
+    fi
+
     cleanup
     log "EPG processing complete!"
 }
