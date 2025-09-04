@@ -190,8 +190,14 @@ sortall() {
 }
 
 mergeall() {
-    if [ ${#generated_files[@]} -lt 2 ]; then
-        echo "Error: Not enough XML files to merge."
+    if [ ${#generated_files[@]} -eq 0 ]; then
+        echo "Error: No XML files to merge."
+        return
+    fi
+
+    if [ ${#generated_files[@]} -eq 1 ]; then
+        log "Only one XML file detected. Copying it to merged.xmltv..."
+        cp -f "${generated_files[0]}" "$BASEPATH/merged.xmltv"
         return
     fi
 
@@ -208,6 +214,74 @@ mergeall() {
             return
         }
     done
+}
+
+ensure_channels_in_merged() {
+    local MERGED_FILE="$BASEPATH/merged.xmltv"
+    local TEMP_FILE="$BASEPATH/merged.with-channels.xmltv"
+
+    if [ ! -f "$MERGED_FILE" ]; then
+        log "Merged file $MERGED_FILE not found for ensuring channels."
+        return
+    fi
+
+    log "Ensuring all channels referenced by programmes exist in $MERGED_FILE..."
+
+    local EXISTING_CH="$BASEPATH/.existing_channels.txt"
+    local REFERENCED_CH="$BASEPATH/.referenced_channels.txt"
+    local MISSING_CH="$BASEPATH/.missing_channels.txt"
+
+    grep -oE '<channel[^>]*id="[^"]+"' "$MERGED_FILE" \
+        | sed -E 's/.*id="([^"]+)"/\1/' \
+        | sort -u > "$EXISTING_CH" || true
+
+    grep -oE '<programme[^>]*channel="[^"]+"' "$MERGED_FILE" \
+        | sed -E 's/.*channel="([^"]+)"/\1/' \
+        | sort -u > "$REFERENCED_CH" || true
+
+    comm -13 "$EXISTING_CH" "$REFERENCED_CH" > "$MISSING_CH" || true
+
+    if [ ! -s "$MISSING_CH" ]; then
+        log "All referenced channels already exist."
+        rm -f "$EXISTING_CH" "$REFERENCED_CH" "$MISSING_CH"
+        return
+    fi
+
+    local missing_count
+    missing_count=$(wc -l < "$MISSING_CH" | tr -d ' ')
+    log "Adding ${missing_count} missing channel definition(s)."
+
+    local MISSING_XML="$BASEPATH/.missing_channels.xml"
+    : > "$MISSING_XML"
+    while IFS= read -r ch; do
+        [ -z "$ch" ] && continue
+        printf '  <channel id="%s">\n' "$ch" >> "$MISSING_XML"
+        printf '      <display-name lang="de">%s</display-name>\n' "$ch" >> "$MISSING_XML"
+        printf '  </channel>\n' >> "$MISSING_XML"
+    done < "$MISSING_CH"
+
+    local prog_line
+    prog_line=$(grep -n '<programme' "$MERGED_FILE" | head -n 1 | cut -d: -f1 || true)
+
+    if [ -n "$prog_line" ]; then
+        awk -v p="$prog_line" -v mx="$MISSING_XML" '
+            NR==p {
+                while ((getline l < mx) > 0) print l;
+                close(mx)
+            }
+            { print }
+        ' "$MERGED_FILE" > "$TEMP_FILE"
+    else
+        {
+            sed '$d' "$MERGED_FILE"
+            cat "$MISSING_XML"
+            echo '</tv>'
+        } > "$TEMP_FILE"
+    fi
+
+    mv "$TEMP_FILE" "$MERGED_FILE"
+    rm -f "$EXISTING_CH" "$REFERENCED_CH" "$MISSING_CH" "$MISSING_XML"
+    log "Missing channel definitions added."
 }
 
 filter_merged() {
@@ -359,13 +433,10 @@ main() {
         esac
     done
 
-    # Calculate CUTOFF_DATE if CUTOFF_DAYS was provided
     if [[ -n "$CUTOFF_DAYS" ]]; then
-        # Check if date command supports --date (GNU date)
         if date --version >/dev/null 2>&1 ; then
              CUTOFF_DATE=$(date --date="+${CUTOFF_DAYS} days" +%Y%m%d)
         else
-             # Attempt BSD date syntax (e.g., macOS)
              if date -v+${CUTOFF_DAYS}d +%Y%m%d >/dev/null 2>&1 ; then
                  CUTOFF_DATE=$(date -v+${CUTOFF_DAYS}d +%Y%m%d)
              else
@@ -375,7 +446,6 @@ main() {
         fi
         log "Calculated cutoff date: $CUTOFF_DATE (${CUTOFF_DAYS} days from today)"
     fi
-
 
     log "Starting EPG processing script..."
     check_dependencies
@@ -390,6 +460,7 @@ main() {
     fixall
     sortall
     mergeall
+    ensure_channels_in_merged
 
     if [[ "$FILTER" == true ]]; then
         filter_merged

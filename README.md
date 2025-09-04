@@ -4,9 +4,15 @@ The epgmerger.sh script is designed to process, merge, and manage Electronic Pro
 It automates tasks such as downloading EPG files, generating dummy EPG entries, sorting, merging, and cleaning up temporary files.
 
 **Requirements**
-```
-sudo apt install wget xmltv gzip sed awk
-```
+
+- Linux with: `wget`, `xmltv` (tv_sort, tv_merge), `gzip`, `sed`, `awk`
+- Install on Debian/Ubuntu:
+  ```
+  sudo apt install wget xmltv gzip sed gawk
+  ```
+  Notes:
+  - `tv_sort` and `tv_merge` come with the `xmltv` package.
+  - On systems without GNU sed/awk, install them or adjust in-place edits accordingly.
 
 ## Features
 
@@ -14,12 +20,16 @@ sudo apt install wget xmltv gzip sed awk
   - Download EPG files from URLs or process local files specified in sources
   - Extract and process compressed .gz EPG files
   - Automatically sort and merge multiple EPG files
+  - If only one source is provided, it is copied to `merged.xmltv`
 - Dummy EPG Creation:
   - Generate a dummy EPG using channel definitions from dummy_channels (optional with -dummy flag)
 - Filter EPG Entries:
   - Apply filtering to the merged EPG file using patterns from filter_epg_patterns (optional with -filter flag)
 - Cutoff Date Filtering:
   - Remove EPG entries starting after a specific date (optional with -cutoff-date or -cutoff-days flags)
+- Channel Consistency:
+  - Ensures all `<programme>` channel references have corresponding `<channel id>` entries
+  - Any missing channel definitions are auto-added at the top, before the first programme
 - Logging:
   - Log output is displayed in the terminal and written to a log file simultaneously
   - Custom log file location can be specified with the LOGFILE environment variable
@@ -28,6 +38,22 @@ sudo apt install wget xmltv gzip sed awk
 
 ```
 ./epgmerger.sh [OPTION]
+```
+
+Examples
+
+```
+# Basic run using entries from the sources file
+./epgmerger.sh
+
+# Generate dummy channels from dummy_channels and filter titles/descriptions
+./epgmerger.sh -dummy -filter
+
+# Keep programmes only up to a fixed date
+./epgmerger.sh -cutoff-date 20251231
+
+# Keep programmes only up to N days from today
+./epgmerger.sh -cutoff-days 7
 ```
 
 ## Options
@@ -43,6 +69,22 @@ sudo apt install wget xmltv gzip sed awk
 - `DEBUG=true`: Enable debug logging
 - `LOGFILE`: Specify a custom log file location (defaults to the script directory)
 
+## Sources file
+
+Define your inputs in `sources` (one per line). Lines starting with `#` are comments.
+
+Examples:
+
+```
+# Remote XMLTV files
+https://example.com/guide_a.xml
+https://example.com/guide_b.xml.gz
+
+# Local files
+/absolute/path/to/local_epg1.xml
+/absolute/path/to/local_epg2.xml
+```
+
 ## File Structure
 
 - `sources`: List of EPG file sources (URLs or local file paths)
@@ -52,7 +94,17 @@ sudo apt install wget xmltv gzip sed awk
 - `merged_backup.xmltv`: Backup of the most recent merged EPG
 - `epgmerger.log`: Default log file (unless specified otherwise)
 
-## 
+## Output details
+
+- `merged.xmltv` is produced at the repository root
+- During processing:
+  - Sources are downloaded or copied locally, extracted if `.gz`, then sorted per channel
+  - Files are merged incrementally using `tv_merge`
+  - Any missing `<channel>` definitions for referenced programmes are added at the top
+  - Optional filtering and cutoff-date pruning are applied
+  - Temporary files are cleaned up automatically
+
+##
 
 This script combines two repos from yurividal
 
