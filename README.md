@@ -21,6 +21,9 @@ It automates tasks such as downloading EPG files, generating dummy EPG entries, 
   - Extract and process compressed .gz EPG files
   - Automatically sort and merge multiple EPG files
   - If only one source is provided, it is copied to `merged.xmltv`
+- Robust fetching and logging:
+  - Resilient downloads with retries and per-attempt logging (success/failed per try)
+  - Continues processing remaining sources even if some fail
 - Dummy EPG Creation:
   - Generate a dummy EPG using channel definitions from dummy_channels (optional with -dummy flag)
 - Filter EPG Entries:
@@ -33,6 +36,7 @@ It automates tasks such as downloading EPG files, generating dummy EPG entries, 
 - Logging:
   - Log output is displayed in the terminal and written to a log file simultaneously
   - Custom log file location can be specified with the LOGFILE environment variable
+  - In-script log rotation: keeps latest 5 logs by default (current + 4 backups) and adds a clear run separator
 
 ## Running the Script
 
@@ -68,6 +72,19 @@ Examples
 
 - `DEBUG=true`: Enable debug logging
 - `LOGFILE`: Specify a custom log file location (defaults to the script directory)
+- `LOG_ROTATE_COUNT`: Number of rotated backups to keep (default: 4). Total kept logs = current + this number.
+- Download retry tuning (defaults shown):
+  - `WGET_TRIES` (3): Number of attempts per source
+  - `WGET_WAIT` (5): Seconds to wait between attempts
+  - `WGET_CONNECT_TIMEOUT` (10): Connection timeout seconds
+  - `WGET_READ_TIMEOUT` (20): Read timeout seconds
+  - `WGET_DNS_TIMEOUT` (10): DNS resolution timeout seconds
+
+Example override for a run:
+
+```
+WGET_TRIES=5 WGET_WAIT=10 LOG_ROTATE_COUNT=6 ./epgmerger.sh
+```
 
 ## Sources file
 
@@ -103,6 +120,9 @@ https://example.com/guide_b.xml.gz
   - Any missing `<channel>` definitions for referenced programmes are added at the top
   - Optional filtering and cutoff-date pruning are applied
   - Temporary files are cleaned up automatically
+  - Logs are rotated at the start of each run:
+    - `epgmerger.log` (current), `epgmerger.log.1`, `epgmerger.log.2`, ... up to `LOG_ROTATE_COUNT`
+    - Each run begins with a separator and timestamped header
 
 ##
 

@@ -1,9 +1,16 @@
 #!/bin/bash
 
 set -euo pipefail
+shopt -s nullglob
 
 BASEPATH="$(dirname "$(realpath "$0")")"
-LOGFILE="${LOGFILE:-$BASEPATH/epgmerger.log}"
+LOGFILE="${LOGFILE:-$BASEPATH/log/epgmerger.log}"
+LOG_ROTATE_COUNT=${LOG_ROTATE_COUNT:-4}
+WGET_TRIES=${WGET_TRIES:-3}
+WGET_WAIT=${WGET_WAIT:-5}
+WGET_CONNECT_TIMEOUT=${WGET_CONNECT_TIMEOUT:-10}
+WGET_READ_TIMEOUT=${WGET_READ_TIMEOUT:-20}
+WGET_DNS_TIMEOUT=${WGET_DNS_TIMEOUT:-10}
 
 DUMMYFILENAME="xdummy.xml"
 SOURCES_FILE="$BASEPATH/sources"
@@ -30,6 +37,38 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+rotate_logs() {
+    mkdir -p "$(dirname "$LOGFILE")"
+
+    if [ -f "$LOGFILE.$LOG_ROTATE_COUNT" ]; then
+        rm -f "$LOGFILE.$LOG_ROTATE_COUNT"
+    fi
+
+    if [ "$LOG_ROTATE_COUNT" -ge 2 ]; then
+        for ((i=LOG_ROTATE_COUNT-1; i>=1; i--)); do
+            if [ -f "$LOGFILE.$i" ]; then
+                mv "$LOGFILE.$i" "$LOGFILE.$((i+1))"
+            fi
+        done
+    fi
+
+    if [ -s "$LOGFILE" ]; then
+        mv "$LOGFILE" "$LOGFILE.1"
+    fi
+
+    : > "$LOGFILE"
+}
+
+log_header() {
+    local ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    local sep="============================================================"
+    {
+        echo "$sep"
+        echo "EPG RUN START - $ts (PID $$)"
+        echo "$sep"
+    } | tee -a "$LOGFILE"
+}
 
 show_help() {
     cat << EOF
@@ -86,7 +125,14 @@ dummycreator() {
     local DUMMY_CHANNELS_FILE="$BASEPATH/dummy_channels"
 
     today=$(date +%Y%m%d)
-    tomorrow=$(date --date="+1 day" +%Y%m%d)
+    if date --version >/dev/null 2>&1 ; then
+        tomorrow=$(date --date="+1 day" +%Y%m%d)
+    elif date -v+1d +%Y%m%d >/dev/null 2>&1 ; then
+        tomorrow=$(date -v+1d +%Y%m%d)
+    else
+        log "Warning: Could not determine tomorrow's date. Using today instead for dummy EPG."
+        tomorrow="$today"
+    fi
 
     if [ ! -f "$DUMMY_CHANNELS_FILE" ]; then
         echo "Error: Dummy channels file not found at $DUMMY_CHANNELS_FILE."
@@ -150,10 +196,46 @@ downloadepgs() {
     for list in "${LISTS[@]}"; do
         if [[ $list == http* ]]; then
             log "Downloading $list..."
-            local dir
+            local dir success attempt
             dir="$(mktemp -d)"
-            wget -q --show-progress -P "$dir" --content-disposition --trust-server-names "$list"
-            for file in "$dir"/*; do
+            success=false
+
+            for ((attempt=1; attempt<=WGET_TRIES; attempt++)); do
+                log "Attempt ${attempt}/${WGET_TRIES}"
+                if wget \
+                    --tries=1 \
+                    --retry-connrefused \
+                    --retry-on-http-error=429,500,502,503,504 \
+                    --connect-timeout="$WGET_CONNECT_TIMEOUT" \
+                    --read-timeout="$WGET_READ_TIMEOUT" \
+                    --dns-timeout="$WGET_DNS_TIMEOUT" \
+                    -P "$dir" --content-disposition --trust-server-names "$list" >/dev/null 2>&1; then
+                    log "Attempt ${attempt}/${WGET_TRIES} - success"
+                    success=true
+                    break
+                fi
+                log "Attempt ${attempt}/${WGET_TRIES} - failed"
+                if (( attempt < WGET_TRIES )); then
+                    sleep "$WGET_WAIT"
+                fi
+            done
+
+            if [ "$success" != true ]; then
+                log "Warning: Failed to download $list. Skipping this source."
+                rmdir "$dir"
+                ((INDEX++))
+                continue
+            fi
+
+            files=("$dir"/*)
+            if [ ${#files[@]} -eq 0 ]; then
+                log "Warning: No file downloaded from $list. Skipping this source."
+                rmdir "$dir"
+                ((INDEX++))
+                continue
+            fi
+
+            for file in "${files[@]}"; do
                 ext=${file##*.}
                 mv "$file" "$BASEPATH/$INDEX.$ext"
                 generated_files+=("$BASEPATH/$INDEX.$ext")
@@ -161,8 +243,12 @@ downloadepgs() {
             rmdir "$dir"
         else
             log "Processing local file $list..."
-            cp "$list" "$BASEPATH/$INDEX.xml"
-            generated_files+=("$BASEPATH/$INDEX.xml")
+            if [ -f "$list" ]; then
+                cp "$list" "$BASEPATH/$INDEX.xml"
+                generated_files+=("$BASEPATH/$INDEX.xml")
+            else
+                log "Warning: Local file $list not found. Skipping this source."
+            fi
         fi
         ((INDEX++))
     done
@@ -170,28 +256,35 @@ downloadepgs() {
 
 extractgz() {
     log "Extracting compressed files..."
-    if ls "$BASEPATH"/*.gz 1>/dev/null 2>&1; then
+    local gz_files=("$BASEPATH"/*.gz)
+    if [ ${#gz_files[@]} -gt 0 ]; then
         for i in "${!generated_files[@]}"; do
             if [[ "${generated_files[$i]}" == *.gz ]]; then
                 generated_files[$i]="${generated_files[$i]%.gz}"
             fi
         done
-        gunzip -f "$BASEPATH"/*.gz
+        gunzip -f "${gz_files[@]}"
     else
         log "No compressed files found to extract."
     fi
 }
 
 sortall() {
+    local ok_files=()
     for xml in "${generated_files[@]}"; do
         log "Sorting $xml..."
-        tv_sort --by-channel --output "$xml" "$xml"
+        if tv_sort --by-channel --output "$xml" "$xml" >/dev/null 2>&1; then
+            ok_files+=("$xml")
+        else
+            log "Warning: Failed to sort $xml. Dropping this file from merge."
+        fi
     done
+    generated_files=("${ok_files[@]}")
 }
 
 mergeall() {
     if [ ${#generated_files[@]} -eq 0 ]; then
-        echo "Error: No XML files to merge."
+        log "Error: No XML files to merge."
         return
     fi
 
@@ -201,18 +294,15 @@ mergeall() {
         return
     fi
 
-    log "Merging ${generated_files[0]} with ${generated_files[1]}..."
-    tv_merge -i "${generated_files[0]}" -m "${generated_files[1]}" -o "$BASEPATH/merged.xmltv" || {
-        echo "Error: Failed to merge files."
-        return
-    }
+    log "Initializing merged.xmltv with ${generated_files[0]}..."
+    cp -f "${generated_files[0]}" "$BASEPATH/merged.xmltv"
 
-    for xml in "${generated_files[@]:2}"; do
-        log "Merging $xml..."
-        tv_merge -i "$BASEPATH/merged.xmltv" -m "$xml" -o "$BASEPATH/merged.xmltv" || {
-            echo "Error: Failed to merge $xml."
-            return
-        }
+    for xml in "${generated_files[@]:1}"; do
+        log "Merging $xml into merged.xmltv..."
+        if ! tv_merge -i "$BASEPATH/merged.xmltv" -m "$xml" -o "$BASEPATH/merged.xmltv" >/dev/null 2>&1; then
+            log "Warning: Failed to merge $xml. Skipping it and continuing."
+            continue
+        fi
     done
 }
 
@@ -432,6 +522,9 @@ main() {
                 ;;
         esac
     done
+
+    rotate_logs
+    log_header
 
     if [[ -n "$CUTOFF_DAYS" ]]; then
         if date --version >/dev/null 2>&1 ; then
