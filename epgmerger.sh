@@ -3,22 +3,33 @@
 set -euo pipefail
 shopt -s nullglob
 
+# Base paths and files
 BASEPATH="$(dirname "$(realpath "$0")")"
+SOURCES_FILE="$BASEPATH/sources"
+DUMMYFILENAME="xdummy.xml"
+
+# Generator info
+GENERATOR_NAME=${GENERATOR_NAME:-"epgxml-merge-dummy"}
+GENERATOR_URL=${GENERATOR_URL:-"https://github.com/mme89/epgxml-merge-dummy"}
+DEFAULT_LANG=${DEFAULT_LANG:-"de"}
+
+# Logging configuration
 LOGFILE="${LOGFILE:-$BASEPATH/log/epgmerger.log}"
 LOG_ROTATE_COUNT=${LOG_ROTATE_COUNT:-4}
+DEBUG=${DEBUG:-false}
+
+# Download configuration
 WGET_TRIES=${WGET_TRIES:-3}
 WGET_WAIT=${WGET_WAIT:-5}
 WGET_CONNECT_TIMEOUT=${WGET_CONNECT_TIMEOUT:-10}
 WGET_READ_TIMEOUT=${WGET_READ_TIMEOUT:-20}
 WGET_DNS_TIMEOUT=${WGET_DNS_TIMEOUT:-10}
 
-DUMMYFILENAME="xdummy.xml"
-SOURCES_FILE="$BASEPATH/sources"
-DEBUG=${DEBUG:-false}
-
+# Dummy EPG time slots
 starttimes=("000000" "060000" "120000" "180000")
 endtimes=("060000" "120000" "180000" "235900")
 
+# Internal state
 generated_files=()
 
 log() {
@@ -93,8 +104,17 @@ Files:
   - filter_epg_patterns: File containing patterns to filter out from the merged EPG file.
 
 Environment Variables:
-  - DEBUG=true   Enable debug logging.
-  - LOGFILE      Specify a custom log file location. Defaults to the script's folder.
+  - GENERATOR_NAME       Set custom generator name in merged EPG file. Default: "epgxml-merge-dummy"
+  - GENERATOR_URL        Set custom generator URL in merged EPG file. Default: "https://github.com/mme89/epgxml-merge-dummy"
+  - DEFAULT_LANG         Set default language code for EPG entries. Default: "de"
+  - LOGFILE              Specify a custom log file location. Default: <script_dir>/log/epgmerger.log
+  - LOG_ROTATE_COUNT     Number of log files to keep. Default: 4
+  - DEBUG                Enable debug logging. Set to "true" to enable.
+  - WGET_TRIES           Number of download retry attempts. Default: 3
+  - WGET_WAIT            Seconds to wait between retries. Default: 5
+  - WGET_CONNECT_TIMEOUT Connection timeout in seconds. Default: 10
+  - WGET_READ_TIMEOUT    Read timeout in seconds. Default: 20
+  - WGET_DNS_TIMEOUT     DNS timeout in seconds. Default: 10
 EOF
     trap - EXIT
     exit 0
@@ -151,27 +171,27 @@ dummycreator() {
 
     {
         echo '<?xml version="1.0" encoding="UTF-8"?>'
-        echo '<tv generator-info-name="dummy" generator-info-url="https://dummy.com/">'
+        echo '<tv>'
 
         while IFS='|' read -r tvgid name title desc; do
             [[ "$tvgid" =~ ^[[:space:]]*# ]] && continue
             [ -z "$tvgid" ] && continue
 
             echo "    <channel id=\"$tvgid\">"
-            echo "        <display-name lang=\"de\">$name</display-name>"
+            echo "        <display-name lang=\"$DEFAULT_LANG\">$name</display-name>"
             echo "    </channel>"
 
             for j in {0..3}; do
                 echo "    <programme start=\"$today${starttimes[$j]} +0000\" stop=\"$today${endtimes[$j]} +0000\" channel=\"$tvgid\">"
-                echo "        <title lang=\"de\">$title</title>"
-                echo "        <desc lang=\"de\">$desc</desc>"
+                echo "        <title lang=\"$DEFAULT_LANG\">$title</title>"
+                echo "        <desc lang=\"$DEFAULT_LANG\">$desc</desc>"
                 echo "    </programme>"
             done
 
             for j in {0..3}; do
                 echo "    <programme start=\"$tomorrow${starttimes[$j]} +0000\" stop=\"$tomorrow${endtimes[$j]} +0000\" channel=\"$tvgid\">"
-                echo "        <title lang=\"de\">$title</title>"
-                echo "        <desc lang=\"de\">$desc</desc>"
+                echo "        <title lang=\"$DEFAULT_LANG\">$title</title>"
+                echo "        <desc lang=\"$DEFAULT_LANG\">$desc</desc>"
                 echo "    </programme>"
             done
         done < "$DUMMY_CHANNELS_FILE"
@@ -186,8 +206,8 @@ fixall() {
     for xml in "${generated_files[@]}"; do
         log "Fixing $xml..."
         sed -i "/<url>/d" "$xml"
-        sed -i "s/lang=\"\"/lang=\"de\"/g" "$xml"
-        sed -i "s/<display-name>/<display-name lang=\"de\">/g" "$xml"
+        sed -i "s/lang=\"\"/lang=\"$DEFAULT_LANG\"/g" "$xml"
+        sed -i "s/<display-name>/<display-name lang=\"$DEFAULT_LANG\">/g" "$xml"
     done
 }
 
@@ -346,7 +366,7 @@ ensure_channels_in_merged() {
     while IFS= read -r ch; do
         [ -z "$ch" ] && continue
         printf '  <channel id="%s">\n' "$ch" >> "$MISSING_XML"
-        printf '      <display-name lang="de">%s</display-name>\n' "$ch" >> "$MISSING_XML"
+        printf '      <display-name lang="%s">%s</display-name>\n' "$DEFAULT_LANG" "$ch" >> "$MISSING_XML"
         printf '  </channel>\n' >> "$MISSING_XML"
     done < "$MISSING_CH"
 
@@ -374,6 +394,30 @@ ensure_channels_in_merged() {
     log "Missing channel definitions added."
 }
 
+fix_tv_tag() {
+    local MERGED_FILE="$BASEPATH/merged.xmltv"
+    local TEMP_FILE="$BASEPATH/merged.temp.xmltv"
+
+    if [ ! -f "$MERGED_FILE" ]; then
+        log "Merged file $MERGED_FILE not found for fixing TV tag."
+        return
+    fi
+
+    log "Replacing <tv> tag with custom generator info..."
+
+    local custom_tv_tag='<tv generator-info-name="'"$GENERATOR_NAME"'" generator-info-url="'"$GENERATOR_URL"'">'
+
+    sed "s|<tv[^>]*>|$custom_tv_tag|" "$MERGED_FILE" > "$TEMP_FILE"
+
+    if [ -s "$TEMP_FILE" ]; then
+        mv "$TEMP_FILE" "$MERGED_FILE"
+        log "TV tag updated successfully."
+    else
+        log "Error: Failed to update TV tag. Original file kept."
+        rm -f "$TEMP_FILE"
+    fi
+}
+
 filter_merged() {
     local PATTERNS_FILE="$BASEPATH/filter_epg_patterns"
     local MERGED_FILE="$BASEPATH/merged.xmltv"
@@ -388,8 +432,10 @@ filter_merged() {
              [[ "$pattern" =~ ^[[:space:]]*# ]] && continue
              [ -z "$pattern" ] && continue
              log "Removing pattern: $pattern"
-             sed -i "/<title/ s|$pattern||g" "$MERGED_FILE"
-             sed -i "/<desc/ s|$pattern||g" "$MERGED_FILE"
+             local escaped_pattern
+             escaped_pattern=$(printf '%s\n' "$pattern" | sed 's/[[\.*^$/]/\\&/g')
+             sed -i "/<title/ s|$escaped_pattern||g" "$MERGED_FILE"
+             sed -i "/<desc/ s|$escaped_pattern||g" "$MERGED_FILE"
         done < "$PATTERNS_FILE"
     else
       log "Merged file $MERGED_FILE not found for filtering."
@@ -554,6 +600,7 @@ main() {
     sortall
     mergeall
     ensure_channels_in_merged
+    fix_tv_tag
 
     if [[ "$FILTER" == true ]]; then
         filter_merged

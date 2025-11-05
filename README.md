@@ -21,6 +21,7 @@ It automates tasks such as downloading EPG files, generating dummy EPG entries, 
   - Extract and process compressed .gz EPG files
   - Automatically sort and merge multiple EPG files
   - If only one source is provided, it is copied to `merged.xmltv`
+  - Custom generator info: Set your own `generator-info-name` and `generator-info-url` in the merged output
 - Robust fetching and logging:
   - Resilient downloads with retries and per-attempt logging (success/failed per try)
   - Continues processing remaining sources even if some fail
@@ -28,11 +29,14 @@ It automates tasks such as downloading EPG files, generating dummy EPG entries, 
   - Generate a dummy EPG using channel definitions from dummy_channels (optional with -dummy flag)
 - Filter EPG Entries:
   - Apply filtering to the merged EPG file using patterns from filter_epg_patterns (optional with -filter flag)
+  - Patterns are escaped for literal matching (special characters like `[`, `*`, `$` are treated as literal text)
 - Cutoff Date Filtering:
   - Remove EPG entries starting after a specific date (optional with -cutoff-date or -cutoff-days flags)
 - Channel Consistency:
   - Ensures all `<programme>` channel references have corresponding `<channel id>` entries
   - Any missing channel definitions are auto-added at the top, before the first programme
+- Configurable Language:
+  - Set default language code for EPG entries (defaults to "de")
 - Logging:
   - Log output is displayed in the terminal and written to a log file simultaneously
   - Custom log file location can be specified with the LOGFILE environment variable
@@ -70,9 +74,12 @@ Examples
 
 ## Environment Variables
 
-- `DEBUG=true`: Enable debug logging
-- `LOGFILE`: Specify a custom log file location (defaults to the script directory)
+- `GENERATOR_NAME`: Set custom generator name in merged EPG file (default: "epgxml-merge-dummy")
+- `GENERATOR_URL`: Set custom generator URL in merged EPG file (default: "https://github.com/mme89/epgxml-merge-dummy")
+- `DEFAULT_LANG`: Set default language code for EPG entries (default: "de")
+- `LOGFILE`: Specify a custom log file location (default: `<script_dir>/log/epgmerger.log`)
 - `LOG_ROTATE_COUNT`: Number of rotated backups to keep (default: 4). Total kept logs = current + this number.
+- `DEBUG`: Enable debug logging (set to "true" to enable)
 - Download retry tuning (defaults shown):
   - `WGET_TRIES` (3): Number of attempts per source
   - `WGET_WAIT` (5): Seconds to wait between attempts
@@ -83,7 +90,7 @@ Examples
 Example override for a run:
 
 ```
-WGET_TRIES=5 WGET_WAIT=10 LOG_ROTATE_COUNT=6 ./epgmerger.sh
+GENERATOR_NAME="My EPG" DEFAULT_LANG="en" WGET_TRIES=5 ./epgmerger.sh
 ```
 
 ## Sources file
@@ -117,6 +124,7 @@ https://example.com/guide_b.xml.gz
 - During processing:
   - Sources are downloaded or copied locally, extracted if `.gz`, then sorted per channel
   - Files are merged incrementally using `tv_merge`
+  - The `<tv>` tag is replaced with custom generator info (configurable via `GENERATOR_NAME` and `GENERATOR_URL`)
   - Any missing `<channel>` definitions for referenced programmes are added at the top
   - Optional filtering and cutoff-date pruning are applied
   - Temporary files are cleaned up automatically
