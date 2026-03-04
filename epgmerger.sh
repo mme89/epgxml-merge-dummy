@@ -31,15 +31,105 @@ endtimes=("060000" "120000" "180000" "235900")
 
 # Internal state
 generated_files=()
+LISTS=()
+SED_INPLACE_ARGS=()
 
 log() {
-    local message
-    message="$(date '+%Y-%m-%d %H:%M:%S') - $@"
-    echo "$message" | tee -a "$LOGFILE"
+    local message logdir
+    message="$(date '+%Y-%m-%d %H:%M:%S') - $*"
+    logdir="$(dirname "$LOGFILE")"
+    mkdir -p "$logdir" 2>/dev/null || true
+
+    echo "$message"
+    printf '%s\n' "$message" >> "$LOGFILE" 2>/dev/null || true
+}
+
+is_debug_enabled() {
+    case "$DEBUG" in
+        true|TRUE|True|1|yes|YES|Yes|on|ON|On)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+debug_log() {
+    if is_debug_enabled; then
+        log "DEBUG: $*"
+    fi
+}
+
+init_sed_mode() {
+    if sed --version >/dev/null 2>&1; then
+        SED_INPLACE_ARGS=(-i)
+    else
+        SED_INPLACE_ARGS=(-i '')
+    fi
+}
+
+sed_inplace() {
+    sed "${SED_INPLACE_ARGS[@]}" "$@"
+}
+
+escape_sed_pattern() {
+    local input="$1"
+    local output=""
+    local ch
+    local i
+
+    for ((i=0; i<${#input}; i++)); do
+        ch="${input:i:1}"
+        case "$ch" in
+            [\\\|\.\^\$\*\[\]\&])
+                output+="\\$ch"
+                ;;
+            *)
+                output+="$ch"
+                ;;
+        esac
+    done
+
+    printf '%s' "$output"
+}
+
+xml_escape_attr() {
+    local value="$1"
+    value=${value//&/&amp;}
+    value=${value//\"/&quot;}
+    value=${value//\'/&apos;}
+    value=${value//</&lt;}
+    value=${value//>/&gt;}
+    printf '%s' "$value"
+}
+
+escape_sed_replacement() {
+    local input="$1"
+    local output=""
+    local ch
+    local i
+
+    for ((i=0; i<${#input}; i++)); do
+        ch="${input:i:1}"
+        case "$ch" in
+            [\\\|\&])
+                output+="\\$ch"
+                ;;
+            *)
+                output+="$ch"
+                ;;
+        esac
+    done
+
+    printf '%s' "$output"
 }
 
 cleanup() {
     log "Cleaning up temporary files..."
+    if [ ${#generated_files[@]} -eq 0 ]; then
+        return
+    fi
     for file in "${generated_files[@]}"; do
         log "Deleting $file..."
         rm -f "$file"
@@ -82,6 +172,7 @@ log_header() {
 }
 
 show_help() {
+    local exit_code="${1:-0}"
     cat << EOF
 Usage: $(basename "$0") [OPTION]
 
@@ -117,7 +208,7 @@ Environment Variables:
   - WGET_DNS_TIMEOUT     DNS timeout in seconds. Default: 10
 EOF
     trap - EXIT
-    exit 0
+    exit "$exit_code"
 }
 
 check_dependencies() {
@@ -129,17 +220,28 @@ check_dependencies() {
     done
 }
 
-if [ ! -f "$SOURCES_FILE" ]; then
-    echo "Error: Sources file not found at $SOURCES_FILE."
-    exit 1
-fi
+validate_config() {
+    if ! [[ "$LOG_ROTATE_COUNT" =~ ^[0-9]+$ ]]; then
+        echo "Warning: LOG_ROTATE_COUNT='$LOG_ROTATE_COUNT' is invalid. Falling back to 4." >&2
+        LOG_ROTATE_COUNT=4
+    fi
+}
 
-LISTS=()
-while IFS= read -r line || [ -n "$line" ]; do
-    [[ "$line" =~ ^[[:space:]]*# ]] && continue
-    [ -z "$line" ] && continue
-    LISTS+=("$line")
-done < "$SOURCES_FILE"
+load_sources() {
+    if [ ! -f "$SOURCES_FILE" ]; then
+        echo "Error: Sources file not found at $SOURCES_FILE."
+        exit 1
+    fi
+
+    LISTS=()
+    while IFS= read -r line || [ -n "$line" ]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [ -z "$line" ] && continue
+        LISTS+=("$line")
+    done < "$SOURCES_FILE"
+
+    debug_log "Loaded ${#LISTS[@]} source(s) from $SOURCES_FILE."
+}
 
 dummycreator() {
     local DUMMY_CHANNELS_FILE="$BASEPATH/dummy_channels"
@@ -203,15 +305,24 @@ dummycreator() {
 }
 
 fixall() {
+    if [ ${#generated_files[@]} -eq 0 ]; then
+        return
+    fi
+
     for xml in "${generated_files[@]}"; do
         log "Fixing $xml..."
-        sed -i "/<url>/d" "$xml"
-        sed -i "s/lang=\"\"/lang=\"$DEFAULT_LANG\"/g" "$xml"
-        sed -i "s/<display-name>/<display-name lang=\"$DEFAULT_LANG\">/g" "$xml"
+        sed_inplace "/<url>/d" "$xml"
+        sed_inplace "s/lang=\"\"/lang=\"$DEFAULT_LANG\"/g" "$xml"
+        sed_inplace "s/<display-name>/<display-name lang=\"$DEFAULT_LANG\">/g" "$xml"
     done
 }
 
 downloadepgs() {
+    if [ ${#LISTS[@]} -eq 0 ]; then
+        log "No sources configured in $SOURCES_FILE. Skipping source download/copy."
+        return
+    fi
+
     local INDEX=1
     for list in "${LISTS[@]}"; do
         if [[ $list == http* ]]; then
@@ -255,17 +366,31 @@ downloadepgs() {
                 continue
             fi
 
+            local file_index="$INDEX"
+            local ext
             for file in "${files[@]}"; do
                 ext=${file##*.}
-                mv "$file" "$BASEPATH/$INDEX.$ext"
-                generated_files+=("$BASEPATH/$INDEX.$ext")
+                mv "$file" "$BASEPATH/$file_index.$ext"
+                generated_files+=("$BASEPATH/$file_index.$ext")
+                ((file_index++))
             done
+
+            INDEX="$file_index"
             rmdir "$dir"
+            continue
         else
             log "Processing local file $list..."
             if [ -f "$list" ]; then
-                cp "$list" "$BASEPATH/$INDEX.xml"
-                generated_files+=("$BASEPATH/$INDEX.xml")
+                local source_name local_ext
+                source_name="${list##*/}"
+                if [[ "$source_name" == *.* ]]; then
+                    local_ext="${source_name##*.}"
+                else
+                    local_ext="xml"
+                fi
+
+                cp "$list" "$BASEPATH/$INDEX.$local_ext"
+                generated_files+=("$BASEPATH/$INDEX.$local_ext")
             else
                 log "Warning: Local file $list not found. Skipping this source."
             fi
@@ -276,20 +401,39 @@ downloadepgs() {
 
 extractgz() {
     log "Extracting compressed files..."
-    local gz_files=("$BASEPATH"/*.gz)
-    if [ ${#gz_files[@]} -gt 0 ]; then
-        for i in "${!generated_files[@]}"; do
-            if [[ "${generated_files[$i]}" == *.gz ]]; then
-                generated_files[$i]="${generated_files[$i]%.gz}"
-            fi
-        done
-        gunzip -f "${gz_files[@]}"
-    else
-        log "No compressed files found to extract."
+    if [ ${#generated_files[@]} -eq 0 ]; then
+        log "No generated files found to extract."
+        return
     fi
+
+    local gz_files=()
+    local source_file
+
+    for i in "${!generated_files[@]}"; do
+        source_file="${generated_files[$i]}"
+        if [[ "$source_file" == *.gz ]]; then
+            if [ -f "$source_file" ]; then
+                gz_files+=("$source_file")
+                generated_files[$i]="${source_file%.gz}"
+            else
+                log "Warning: Compressed file not found: $source_file"
+            fi
+        fi
+    done
+
+    if [ ${#gz_files[@]} -eq 0 ]; then
+        log "No compressed files found to extract."
+        return
+    fi
+
+    gunzip -f "${gz_files[@]}"
 }
 
 sortall() {
+    if [ ${#generated_files[@]} -eq 0 ]; then
+        return
+    fi
+
     local ok_files=()
     for xml in "${generated_files[@]}"; do
         log "Sorting $xml..."
@@ -305,13 +449,13 @@ sortall() {
 mergeall() {
     if [ ${#generated_files[@]} -eq 0 ]; then
         log "Error: No XML files to merge."
-        return
+        return 1
     fi
 
     if [ ${#generated_files[@]} -eq 1 ]; then
         log "Only one XML file detected. Copying it to merged.xmltv..."
         cp -f "${generated_files[0]}" "$BASEPATH/merged.xmltv"
-        return
+        return 0
     fi
 
     log "Initializing merged.xmltv with ${generated_files[0]}..."
@@ -324,6 +468,8 @@ mergeall() {
             continue
         fi
     done
+
+    return 0
 }
 
 ensure_channels_in_merged() {
@@ -405,9 +551,13 @@ fix_tv_tag() {
 
     log "Replacing <tv> tag with custom generator info..."
 
-    local custom_tv_tag='<tv generator-info-name="'"$GENERATOR_NAME"'" generator-info-url="'"$GENERATOR_URL"'">'
+    local generator_name_xml generator_url_xml custom_tv_tag_raw custom_tv_tag_sed
+    generator_name_xml="$(xml_escape_attr "$GENERATOR_NAME")"
+    generator_url_xml="$(xml_escape_attr "$GENERATOR_URL")"
+    custom_tv_tag_raw='<tv generator-info-name="'"$generator_name_xml"'" generator-info-url="'"$generator_url_xml"'">'
+    custom_tv_tag_sed="$(escape_sed_replacement "$custom_tv_tag_raw")"
 
-    sed "s|<tv[^>]*>|$custom_tv_tag|" "$MERGED_FILE" > "$TEMP_FILE"
+    sed "s|<tv[^>]*>|$custom_tv_tag_sed|" "$MERGED_FILE" > "$TEMP_FILE"
 
     if [ -s "$TEMP_FILE" ]; then
         mv "$TEMP_FILE" "$MERGED_FILE"
@@ -433,9 +583,9 @@ filter_merged() {
              [ -z "$pattern" ] && continue
              log "Removing pattern: $pattern"
              local escaped_pattern
-             escaped_pattern=$(printf '%s\n' "$pattern" | sed 's/[[\.*^$/]/\\&/g')
-             sed -i "/<title/ s|$escaped_pattern||g" "$MERGED_FILE"
-             sed -i "/<desc/ s|$escaped_pattern||g" "$MERGED_FILE"
+             escaped_pattern=$(escape_sed_pattern "$pattern")
+             sed_inplace "/<title/ s|$escaped_pattern||g" "$MERGED_FILE"
+             sed_inplace "/<desc/ s|$escaped_pattern||g" "$MERGED_FILE"
         done < "$PATTERNS_FILE"
     else
       log "Merged file $MERGED_FILE not found for filtering."
@@ -459,12 +609,15 @@ filter_by_cutoff_date() {
     /<programme / {
         in_prog = 1;
         start_attr_line = $0;
-        match(start_attr_line, /start="([0-9]{8})/);
-        start_date = substr(start_attr_line, RSTART + 7, 8);
-
-        if (start_date > cutoff) {
-            keep_prog = 0;
-            buffer = "";
+        if (match(start_attr_line, /start="[0-9]{8}/)) {
+            start_date = substr(start_attr_line, RSTART + 7, 8);
+            if (start_date > cutoff) {
+                keep_prog = 0;
+                buffer = "";
+            } else {
+                keep_prog = 1;
+                buffer = $0 ORS;
+            }
         } else {
             keep_prog = 1;
             buffer = $0 ORS;
@@ -539,7 +692,7 @@ main() {
                     echo "Error: Cannot use -cutoff-date and -cutoff-days together." >&2
                     exit 1
                 fi
-                if [[ -n "$2" && "$2" =~ ^[0-9]{8}$ ]]; then
+                if [[ "${2:-}" =~ ^[0-9]{8}$ ]]; then
                     CUTOFF_DATE="$2"
                     shift
                     shift
@@ -553,7 +706,7 @@ main() {
                      echo "Error: Cannot use -cutoff-date and -cutoff-days together." >&2
                      exit 1
                 fi
-                if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
                     CUTOFF_DAYS="$2"
                     shift
                     shift
@@ -564,11 +717,12 @@ main() {
                 ;;
             *)
                 echo "Unknown option: $1" >&2
-                show_help
+                show_help 1
                 ;;
         esac
     done
 
+    validate_config
     rotate_logs
     log_header
 
@@ -587,7 +741,11 @@ main() {
     fi
 
     log "Starting EPG processing script..."
+    debug_log "Flags: dummy=$DUMMY filter=$FILTER cutoff_date=${CUTOFF_DATE:-none}"
+    debug_log "Config: logfile=$LOGFILE rotate_count=$LOG_ROTATE_COUNT default_lang=$DEFAULT_LANG"
+    init_sed_mode
     check_dependencies
+    load_sources
     backup_existing_merged
 
     if [[ "$DUMMY" == true ]]; then
@@ -598,7 +756,10 @@ main() {
     extractgz
     fixall
     sortall
-    mergeall
+    if ! mergeall; then
+        log "Merge step failed. Aborting remaining post-merge steps."
+        return 1
+    fi
     ensure_channels_in_merged
     fix_tv_tag
 
