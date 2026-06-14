@@ -7,6 +7,7 @@ shopt -s nullglob
 BASEPATH="$(dirname "$(realpath "$0")")"
 SOURCES_FILE="$BASEPATH/sources"
 DUMMYFILENAME="xdummy.xml"
+FINAL_MERGED_FILE="$BASEPATH/merged.xmltv"
 
 # Generator info
 GENERATOR_NAME=${GENERATOR_NAME:-"epgxml-merge-dummy"}
@@ -33,6 +34,8 @@ endtimes=("060000" "120000" "180000" "235900")
 generated_files=()
 LISTS=()
 SED_INPLACE_ARGS=()
+RUN_WORKDIR=""
+MERGED_FILE=""
 
 log() {
     local message logdir
@@ -61,6 +64,14 @@ debug_log() {
     fi
 }
 
+trim_config_value() {
+    local value="$1"
+    value="${value//$'\r'/}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
 init_sed_mode() {
     if sed --version >/dev/null 2>&1; then
         SED_INPLACE_ARGS=(-i)
@@ -82,7 +93,7 @@ escape_sed_pattern() {
     for ((i=0; i<${#input}; i++)); do
         ch="${input:i:1}"
         case "$ch" in
-            [\\\|\.\^\$\*\[\]\&])
+            "\\"|"|"|"."|"^"|"\$"|"*"|"["|"]"|"&")
                 output+="\\$ch"
                 ;;
             *)
@@ -96,12 +107,42 @@ escape_sed_pattern() {
 
 xml_escape_attr() {
     local value="$1"
-    value=${value//&/&amp;}
-    value=${value//\"/&quot;}
-    value=${value//\'/&apos;}
-    value=${value//</&lt;}
-    value=${value//>/&gt;}
-    printf '%s' "$value"
+    local output=""
+    local ch
+    local i
+
+    for ((i=0; i<${#value}; i++)); do
+        ch="${value:i:1}"
+        case "$ch" in
+            '&') output+="&amp;" ;;
+            '"') output+="&quot;" ;;
+            "'") output+="&apos;" ;;
+            '<') output+="&lt;" ;;
+            '>') output+="&gt;" ;;
+            *) output+="$ch" ;;
+        esac
+    done
+
+    printf '%s' "$output"
+}
+
+xml_escape_text() {
+    local value="$1"
+    local output=""
+    local ch
+    local i
+
+    for ((i=0; i<${#value}; i++)); do
+        ch="${value:i:1}"
+        case "$ch" in
+            '&') output+="&amp;" ;;
+            '<') output+="&lt;" ;;
+            '>') output+="&gt;" ;;
+            *) output+="$ch" ;;
+        esac
+    done
+
+    printf '%s' "$output"
 }
 
 escape_sed_replacement() {
@@ -127,13 +168,13 @@ escape_sed_replacement() {
 
 cleanup() {
     log "Cleaning up temporary files..."
-    if [ ${#generated_files[@]} -eq 0 ]; then
+    if [ -z "$RUN_WORKDIR" ] || [ ! -d "$RUN_WORKDIR" ]; then
         return
     fi
-    for file in "${generated_files[@]}"; do
-        log "Deleting $file..."
-        rm -f "$file"
-    done
+
+    log "Deleting temporary workspace $RUN_WORKDIR..."
+    rm -rf "$RUN_WORKDIR"
+    RUN_WORKDIR=""
     generated_files=()
 }
 
@@ -142,8 +183,17 @@ trap cleanup EXIT
 rotate_logs() {
     mkdir -p "$(dirname "$LOGFILE")"
 
-    if [ -f "$LOGFILE.$LOG_ROTATE_COUNT" ]; then
-        rm -f "$LOGFILE.$LOG_ROTATE_COUNT"
+    local rotated_log suffix
+    for rotated_log in "$LOGFILE".[0-9]*; do
+        suffix="${rotated_log#"$LOGFILE".}"
+        if [[ "$suffix" =~ ^[0-9]+$ ]] && [ "$suffix" -ge "$LOG_ROTATE_COUNT" ]; then
+            rm -f "$rotated_log"
+        fi
+    done
+
+    if [ "$LOG_ROTATE_COUNT" -eq 0 ]; then
+        : > "$LOGFILE"
+        return
     fi
 
     if [ "$LOG_ROTATE_COUNT" -ge 2 ]; then
@@ -162,8 +212,12 @@ rotate_logs() {
 }
 
 log_header() {
-    local ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    local ts
+    local logdir
     local sep="============================================================"
+    logdir="$(dirname "$LOGFILE")"
+    mkdir -p "$logdir"
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
     {
         echo "$sep"
         echo "EPG RUN START - $ts (PID $$)"
@@ -177,6 +231,7 @@ show_help() {
 Usage: $(basename "$0") [OPTION]
 
 This script generates, downloads, processes, and merges EPG (Electronic Program Guide) XML files.
+Requires wget, xmltv (tv_sort/tv_merge), gunzip, sed, awk, mktemp, perl, and XML::LibXML.
 
 Options:
   --help         Show this help message and exit.
@@ -186,7 +241,8 @@ Options:
                  Remove programme entries starting after this date (e.g., 20241231).
                  Cannot be used with -cutoff-days.
   -cutoff-days N
-                 Remove programme entries starting N days after today.
+                 Remove programme entries starting after N days from today.
+                 N must be a positive integer.
                  Cannot be used with -cutoff-date.
 
 Files:
@@ -199,31 +255,67 @@ Environment Variables:
   - GENERATOR_URL        Set custom generator URL in merged EPG file. Default: "https://github.com/mme89/epgxml-merge-dummy"
   - DEFAULT_LANG         Set default language code for EPG entries. Default: "de"
   - LOGFILE              Specify a custom log file location. Default: <script_dir>/log/epgmerger.log
-  - LOG_ROTATE_COUNT     Number of log files to keep. Default: 4
+  - LOG_ROTATE_COUNT     Number of rotated log backups to keep. Default: 4. Set to 0 to disable backups.
   - DEBUG                Enable debug logging. Set to "true" to enable.
-  - WGET_TRIES           Number of download retry attempts. Default: 3
-  - WGET_WAIT            Seconds to wait between retries. Default: 5
-  - WGET_CONNECT_TIMEOUT Connection timeout in seconds. Default: 10
-  - WGET_READ_TIMEOUT    Read timeout in seconds. Default: 20
-  - WGET_DNS_TIMEOUT     DNS timeout in seconds. Default: 10
+  - WGET_TRIES           Number of download retry attempts. Must be >= 1. Default: 3
+  - WGET_WAIT            Seconds to wait between retries. Must be >= 0. Default: 5
+  - WGET_CONNECT_TIMEOUT Connection timeout in seconds. Must be >= 1. Default: 10
+  - WGET_READ_TIMEOUT    Read timeout in seconds. Must be >= 1. Default: 20
+  - WGET_DNS_TIMEOUT     DNS timeout in seconds. Must be >= 1. Default: 10
 EOF
     trap - EXIT
     exit "$exit_code"
 }
 
 check_dependencies() {
-    for cmd in wget tv_sort tv_merge gunzip sed awk; do
+    for cmd in wget tv_sort tv_merge gunzip sed awk mktemp perl; do
         if ! command -v "$cmd" &>/dev/null; then
             echo "Error: $cmd is not installed. Please install it and try again."
             exit 1
         fi
     done
+
+    if ! perl -MXML::LibXML -e 1 >/dev/null 2>&1; then
+        echo "Error: Perl module XML::LibXML is not installed. Please install it and try again."
+        exit 1
+    fi
+}
+
+init_workdir() {
+    RUN_WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/epgmerger.XXXXXX")"
+    MERGED_FILE="$RUN_WORKDIR/merged.xmltv"
+    log "Using temporary workspace $RUN_WORKDIR"
 }
 
 validate_config() {
     if ! [[ "$LOG_ROTATE_COUNT" =~ ^[0-9]+$ ]]; then
         echo "Warning: LOG_ROTATE_COUNT='$LOG_ROTATE_COUNT' is invalid. Falling back to 4." >&2
         LOG_ROTATE_COUNT=4
+    fi
+
+    if ! [[ "$WGET_TRIES" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Warning: WGET_TRIES='$WGET_TRIES' is invalid. Falling back to 3." >&2
+        WGET_TRIES=3
+    fi
+
+    if ! [[ "$WGET_WAIT" =~ ^[0-9]+$ ]]; then
+        echo "Warning: WGET_WAIT='$WGET_WAIT' is invalid. Falling back to 5." >&2
+        WGET_WAIT=5
+    fi
+
+    if ! [[ "$WGET_CONNECT_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Warning: WGET_CONNECT_TIMEOUT='$WGET_CONNECT_TIMEOUT' is invalid. Falling back to 10." >&2
+        WGET_CONNECT_TIMEOUT=10
+    fi
+
+    if ! [[ "$WGET_READ_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Warning: WGET_READ_TIMEOUT='$WGET_READ_TIMEOUT' is invalid. Falling back to 20." >&2
+        WGET_READ_TIMEOUT=20
+    fi
+
+    if ! [[ "$WGET_DNS_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Warning: WGET_DNS_TIMEOUT='$WGET_DNS_TIMEOUT' is invalid. Falling back to 10." >&2
+        WGET_DNS_TIMEOUT=10
     fi
 }
 
@@ -235,7 +327,8 @@ load_sources() {
 
     LISTS=()
     while IFS= read -r line || [ -n "$line" ]; do
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        line="$(trim_config_value "$line")"
+        [[ "$line" =~ ^# ]] && continue
         [ -z "$line" ] && continue
         LISTS+=("$line")
     done < "$SOURCES_FILE"
@@ -245,12 +338,14 @@ load_sources() {
 
 dummycreator() {
     local DUMMY_CHANNELS_FILE="$BASEPATH/dummy_channels"
+    local default_lang_xml
+    default_lang_xml="$(xml_escape_attr "$DEFAULT_LANG")"
 
     today=$(date +%Y%m%d)
-    if date --version >/dev/null 2>&1 ; then
-        tomorrow=$(date --date="+1 day" +%Y%m%d)
-    elif date -v+1d +%Y%m%d >/dev/null 2>&1 ; then
-        tomorrow=$(date -v+1d +%Y%m%d)
+    if tomorrow=$(date --date="+1 day" +%Y%m%d 2>/dev/null); then
+        :
+    elif tomorrow=$(date -v+1d +%Y%m%d 2>/dev/null); then
+        :
     else
         log "Warning: Could not determine tomorrow's date. Using today instead for dummy EPG."
         tomorrow="$today"
@@ -261,8 +356,14 @@ dummycreator() {
         exit 1
     fi
 
-    local numberofchannels
-    numberofchannels=$(grep -v '^[[:space:]]*#' "$DUMMY_CHANNELS_FILE" | grep -v '^[[:space:]]*$' | wc -l)
+    local numberofchannels=0
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="$(trim_config_value "$line")"
+        [[ "$line" =~ ^# ]] && continue
+        [ -z "$line" ] && continue
+        numberofchannels=$((numberofchannels + 1))
+    done < "$DUMMY_CHANNELS_FILE"
 
     if [ "$numberofchannels" -eq 0 ]; then
         echo "Error: Dummy channels file is empty or contains only comments. Please add at least one channel."
@@ -275,33 +376,47 @@ dummycreator() {
         echo '<?xml version="1.0" encoding="UTF-8"?>'
         echo '<tv>'
 
-        while IFS='|' read -r tvgid name title desc; do
-            [[ "$tvgid" =~ ^[[:space:]]*# ]] && continue
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="$(trim_config_value "$line")"
+            [[ "$line" =~ ^# ]] && continue
+            [ -z "$line" ] && continue
+
+            IFS='|' read -r tvgid name title desc <<< "$line"
+            tvgid="$(trim_config_value "$tvgid")"
+            name="$(trim_config_value "${name:-}")"
+            title="$(trim_config_value "${title:-}")"
+            desc="$(trim_config_value "${desc:-}")"
             [ -z "$tvgid" ] && continue
 
-            echo "    <channel id=\"$tvgid\">"
-            echo "        <display-name lang=\"$DEFAULT_LANG\">$name</display-name>"
+            local tvgid_xml name_xml title_xml desc_xml
+            tvgid_xml="$(xml_escape_attr "$tvgid")"
+            name_xml="$(xml_escape_text "$name")"
+            title_xml="$(xml_escape_text "$title")"
+            desc_xml="$(xml_escape_text "$desc")"
+
+            echo "    <channel id=\"$tvgid_xml\">"
+            echo "        <display-name lang=\"$default_lang_xml\">$name_xml</display-name>"
             echo "    </channel>"
 
             for j in {0..3}; do
-                echo "    <programme start=\"$today${starttimes[$j]} +0000\" stop=\"$today${endtimes[$j]} +0000\" channel=\"$tvgid\">"
-                echo "        <title lang=\"$DEFAULT_LANG\">$title</title>"
-                echo "        <desc lang=\"$DEFAULT_LANG\">$desc</desc>"
+                echo "    <programme start=\"$today${starttimes[$j]} +0000\" stop=\"$today${endtimes[$j]} +0000\" channel=\"$tvgid_xml\">"
+                echo "        <title lang=\"$default_lang_xml\">$title_xml</title>"
+                echo "        <desc lang=\"$default_lang_xml\">$desc_xml</desc>"
                 echo "    </programme>"
             done
 
             for j in {0..3}; do
-                echo "    <programme start=\"$tomorrow${starttimes[$j]} +0000\" stop=\"$tomorrow${endtimes[$j]} +0000\" channel=\"$tvgid\">"
-                echo "        <title lang=\"$DEFAULT_LANG\">$title</title>"
-                echo "        <desc lang=\"$DEFAULT_LANG\">$desc</desc>"
+                echo "    <programme start=\"$tomorrow${starttimes[$j]} +0000\" stop=\"$tomorrow${endtimes[$j]} +0000\" channel=\"$tvgid_xml\">"
+                echo "        <title lang=\"$default_lang_xml\">$title_xml</title>"
+                echo "        <desc lang=\"$default_lang_xml\">$desc_xml</desc>"
                 echo "    </programme>"
             done
         done < "$DUMMY_CHANNELS_FILE"
 
         echo '</tv>'
-    } >"$BASEPATH/$DUMMYFILENAME"
+    } >"$RUN_WORKDIR/$DUMMYFILENAME"
 
-    generated_files+=("$BASEPATH/$DUMMYFILENAME")
+    generated_files+=("$RUN_WORKDIR/$DUMMYFILENAME")
 }
 
 fixall() {
@@ -328,7 +443,7 @@ downloadepgs() {
         if [[ $list == http* ]]; then
             log "Downloading $list..."
             local dir success attempt
-            dir="$(mktemp -d)"
+            dir="$(mktemp -d "$RUN_WORKDIR/download.XXXXXX")"
             success=false
 
             for ((attempt=1; attempt<=WGET_TRIES; attempt++)); do
@@ -354,15 +469,16 @@ downloadepgs() {
             if [ "$success" != true ]; then
                 log "Warning: Failed to download $list. Skipping this source."
                 rmdir "$dir"
-                ((INDEX++))
+                INDEX=$((INDEX + 1))
                 continue
             fi
 
+            local files
             files=("$dir"/*)
             if [ ${#files[@]} -eq 0 ]; then
                 log "Warning: No file downloaded from $list. Skipping this source."
                 rmdir "$dir"
-                ((INDEX++))
+                INDEX=$((INDEX + 1))
                 continue
             fi
 
@@ -370,9 +486,9 @@ downloadepgs() {
             local ext
             for file in "${files[@]}"; do
                 ext=${file##*.}
-                mv "$file" "$BASEPATH/$file_index.$ext"
-                generated_files+=("$BASEPATH/$file_index.$ext")
-                ((file_index++))
+                mv "$file" "$RUN_WORKDIR/$file_index.$ext"
+                generated_files+=("$RUN_WORKDIR/$file_index.$ext")
+                file_index=$((file_index + 1))
             done
 
             INDEX="$file_index"
@@ -389,13 +505,13 @@ downloadepgs() {
                     local_ext="xml"
                 fi
 
-                cp "$list" "$BASEPATH/$INDEX.$local_ext"
-                generated_files+=("$BASEPATH/$INDEX.$local_ext")
+                cp "$list" "$RUN_WORKDIR/$INDEX.$local_ext"
+                generated_files+=("$RUN_WORKDIR/$INDEX.$local_ext")
             else
                 log "Warning: Local file $list not found. Skipping this source."
             fi
         fi
-        ((INDEX++))
+        INDEX=$((INDEX + 1))
     done
 }
 
@@ -406,27 +522,38 @@ extractgz() {
         return
     fi
 
-    local gz_files=()
-    local source_file
+    local extracted_any=false
+    local ok_files=()
+    local source_file output_file tmp_file
 
-    for i in "${!generated_files[@]}"; do
-        source_file="${generated_files[$i]}"
+    for source_file in "${generated_files[@]}"; do
         if [[ "$source_file" == *.gz ]]; then
             if [ -f "$source_file" ]; then
-                gz_files+=("$source_file")
-                generated_files[$i]="${source_file%.gz}"
+                extracted_any=true
+                output_file="${source_file%.gz}"
+                tmp_file="$(mktemp "$RUN_WORKDIR/extracted.XXXXXX.xmltv")"
+
+                if gunzip -c "$source_file" > "$tmp_file" 2>/dev/null && [ -s "$tmp_file" ]; then
+                    mv "$tmp_file" "$output_file"
+                    rm -f "$source_file"
+                    ok_files+=("$output_file")
+                else
+                    log "Warning: Failed to extract $source_file. Dropping this file from merge."
+                    rm -f "$tmp_file"
+                fi
             else
                 log "Warning: Compressed file not found: $source_file"
             fi
+        else
+            ok_files+=("$source_file")
         fi
     done
 
-    if [ ${#gz_files[@]} -eq 0 ]; then
+    if [ "$extracted_any" != true ]; then
         log "No compressed files found to extract."
-        return
     fi
 
-    gunzip -f "${gz_files[@]}"
+    generated_files=("${ok_files[@]}")
 }
 
 sortall() {
@@ -437,10 +564,14 @@ sortall() {
     local ok_files=()
     for xml in "${generated_files[@]}"; do
         log "Sorting $xml..."
-        if tv_sort --by-channel --output "$xml" "$xml" >/dev/null 2>&1; then
+        local sorted_tmp
+        sorted_tmp="$(mktemp "$RUN_WORKDIR/sorted.XXXXXX.xmltv")"
+        if tv_sort --by-channel --output "$sorted_tmp" "$xml" >/dev/null 2>&1 && [ -s "$sorted_tmp" ]; then
+            mv "$sorted_tmp" "$xml"
             ok_files+=("$xml")
         else
             log "Warning: Failed to sort $xml. Dropping this file from merge."
+            rm -f "$sorted_tmp"
         fi
     done
     generated_files=("${ok_files[@]}")
@@ -454,17 +585,22 @@ mergeall() {
 
     if [ ${#generated_files[@]} -eq 1 ]; then
         log "Only one XML file detected. Copying it to merged.xmltv..."
-        cp -f "${generated_files[0]}" "$BASEPATH/merged.xmltv"
+        cp -f "${generated_files[0]}" "$MERGED_FILE"
         return 0
     fi
 
     log "Initializing merged.xmltv with ${generated_files[0]}..."
-    cp -f "${generated_files[0]}" "$BASEPATH/merged.xmltv"
+    cp -f "${generated_files[0]}" "$MERGED_FILE"
 
     for xml in "${generated_files[@]:1}"; do
         log "Merging $xml into merged.xmltv..."
-        if ! tv_merge -i "$BASEPATH/merged.xmltv" -m "$xml" -o "$BASEPATH/merged.xmltv" >/dev/null 2>&1; then
+        local merge_tmp
+        merge_tmp="$(mktemp "$RUN_WORKDIR/merged.XXXXXX.xmltv")"
+        if tv_merge -i "$MERGED_FILE" -m "$xml" -o "$merge_tmp" >/dev/null 2>&1 && [ -s "$merge_tmp" ]; then
+            mv "$merge_tmp" "$MERGED_FILE"
+        else
             log "Warning: Failed to merge $xml. Skipping it and continuing."
+            rm -f "$merge_tmp"
             continue
         fi
     done
@@ -473,8 +609,7 @@ mergeall() {
 }
 
 ensure_channels_in_merged() {
-    local MERGED_FILE="$BASEPATH/merged.xmltv"
-    local TEMP_FILE="$BASEPATH/merged.with-channels.xmltv"
+    local TEMP_FILE="$RUN_WORKDIR/merged.with-channels.xmltv"
 
     if [ ! -f "$MERGED_FILE" ]; then
         log "Merged file $MERGED_FILE not found for ensuring channels."
@@ -483,66 +618,78 @@ ensure_channels_in_merged() {
 
     log "Ensuring all channels referenced by programmes exist in $MERGED_FILE..."
 
-    local EXISTING_CH="$BASEPATH/.existing_channels.txt"
-    local REFERENCED_CH="$BASEPATH/.referenced_channels.txt"
-    local MISSING_CH="$BASEPATH/.missing_channels.txt"
+    local missing_count
+    if ! missing_count=$(perl -MXML::LibXML -e '
+        use strict;
+        use warnings;
 
-    grep -oE '<channel[^>]*id="[^"]+"' "$MERGED_FILE" \
-        | sed -E 's/.*id="([^"]+)"/\1/' \
-        | sort -u > "$EXISTING_CH" || true
+        my ($file, $out, $lang) = @ARGV;
+        my $parser = XML::LibXML->new(no_blanks => 0);
+        my $doc = $parser->parse_file($file);
+        my $root = $doc->documentElement;
+        die "Root element is not <tv>\n" unless $root && $root->nodeName eq "tv";
 
-    grep -oE '<programme[^>]*channel="[^"]+"' "$MERGED_FILE" \
-        | sed -E 's/.*channel="([^"]+)"/\1/' \
-        | sort -u > "$REFERENCED_CH" || true
+        my %existing = map { $_->getAttribute("id") => 1 } $root->findnodes("./channel[\@id]");
+        my @missing;
+        my %seen_missing;
 
-    comm -13 "$EXISTING_CH" "$REFERENCED_CH" > "$MISSING_CH" || true
+        for my $programme ($root->findnodes(".//programme[\@channel]")) {
+            my $channel = $programme->getAttribute("channel");
+            next if $channel eq "";
+            next if $existing{$channel} || $seen_missing{$channel};
+            push @missing, $channel;
+            $seen_missing{$channel} = 1;
+        }
 
-    if [ ! -s "$MISSING_CH" ]; then
-        log "All referenced channels already exist."
-        rm -f "$EXISTING_CH" "$REFERENCED_CH" "$MISSING_CH"
+        if (!@missing) {
+            print "0\n";
+            exit 0;
+        }
+
+        my ($first_programme) = $root->findnodes("./programme[1]");
+        for my $channel_id (@missing) {
+            my $channel = $doc->createElement("channel");
+            $channel->setAttribute(id => $channel_id);
+
+            my $display_name = $doc->createElement("display-name");
+            $display_name->setAttribute(lang => $lang) if defined $lang && $lang ne "";
+            $display_name->appendTextNode($channel_id);
+            $channel->appendChild($doc->createTextNode("\n    "));
+            $channel->appendChild($display_name);
+            $channel->appendChild($doc->createTextNode("\n  "));
+
+            if ($first_programme) {
+                $root->insertBefore($channel, $first_programme);
+                $root->insertBefore($doc->createTextNode("\n  "), $first_programme);
+            } else {
+                $root->appendChild($doc->createTextNode("\n  "));
+                $root->appendChild($channel);
+            }
+        }
+
+        $root->appendChild($doc->createTextNode("\n")) unless $first_programme;
+        open my $fh, ">:encoding(UTF-8)", $out or die "Cannot write $out: $!\n";
+        print {$fh} $doc->toString(1);
+        close $fh;
+        print scalar(@missing), "\n";
+    ' "$MERGED_FILE" "$TEMP_FILE" "$DEFAULT_LANG"); then
+        log "Error: Failed to ensure channel definitions. Original file kept."
+        rm -f "$TEMP_FILE"
         return
     fi
 
-    local missing_count
-    missing_count=$(wc -l < "$MISSING_CH" | tr -d ' ')
-    log "Adding ${missing_count} missing channel definition(s)."
-
-    local MISSING_XML="$BASEPATH/.missing_channels.xml"
-    : > "$MISSING_XML"
-    while IFS= read -r ch; do
-        [ -z "$ch" ] && continue
-        printf '  <channel id="%s">\n' "$ch" >> "$MISSING_XML"
-        printf '      <display-name lang="%s">%s</display-name>\n' "$DEFAULT_LANG" "$ch" >> "$MISSING_XML"
-        printf '  </channel>\n' >> "$MISSING_XML"
-    done < "$MISSING_CH"
-
-    local prog_line
-    prog_line=$(grep -n '<programme' "$MERGED_FILE" | head -n 1 | cut -d: -f1 || true)
-
-    if [ -n "$prog_line" ]; then
-        awk -v p="$prog_line" -v mx="$MISSING_XML" '
-            NR==p {
-                while ((getline l < mx) > 0) print l;
-                close(mx)
-            }
-            { print }
-        ' "$MERGED_FILE" > "$TEMP_FILE"
-    else
-        {
-            sed '$d' "$MERGED_FILE"
-            cat "$MISSING_XML"
-            echo '</tv>'
-        } > "$TEMP_FILE"
+    if [ "$missing_count" -eq 0 ]; then
+        log "All referenced channels already exist."
+        return
     fi
 
+    log "Adding ${missing_count} missing channel definition(s)."
     mv "$TEMP_FILE" "$MERGED_FILE"
-    rm -f "$EXISTING_CH" "$REFERENCED_CH" "$MISSING_CH" "$MISSING_XML"
     log "Missing channel definitions added."
 }
 
 fix_tv_tag() {
-    local MERGED_FILE="$BASEPATH/merged.xmltv"
-    local TEMP_FILE="$BASEPATH/merged.temp.xmltv"
+    local TEMP_FILE="$RUN_WORKDIR/merged.temp.xmltv"
 
     if [ ! -f "$MERGED_FILE" ]; then
         log "Merged file $MERGED_FILE not found for fixing TV tag."
@@ -551,13 +698,27 @@ fix_tv_tag() {
 
     log "Replacing <tv> tag with custom generator info..."
 
-    local generator_name_xml generator_url_xml custom_tv_tag_raw custom_tv_tag_sed
-    generator_name_xml="$(xml_escape_attr "$GENERATOR_NAME")"
-    generator_url_xml="$(xml_escape_attr "$GENERATOR_URL")"
-    custom_tv_tag_raw='<tv generator-info-name="'"$generator_name_xml"'" generator-info-url="'"$generator_url_xml"'">'
-    custom_tv_tag_sed="$(escape_sed_replacement "$custom_tv_tag_raw")"
+    if ! perl -MXML::LibXML -e '
+        use strict;
+        use warnings;
 
-    sed "s|<tv[^>]*>|$custom_tv_tag_sed|" "$MERGED_FILE" > "$TEMP_FILE"
+        my ($file, $out, $generator_name, $generator_url) = @ARGV;
+        my $parser = XML::LibXML->new(no_blanks => 0);
+        my $doc = $parser->parse_file($file);
+        my $root = $doc->documentElement;
+        die "Root element is not <tv>\n" unless $root && $root->nodeName eq "tv";
+
+        $root->setAttribute("generator-info-name", $generator_name);
+        $root->setAttribute("generator-info-url", $generator_url);
+
+        open my $fh, ">:encoding(UTF-8)", $out or die "Cannot write $out: $!\n";
+        print {$fh} $doc->toString(1);
+        close $fh;
+    ' "$MERGED_FILE" "$TEMP_FILE" "$GENERATOR_NAME" "$GENERATOR_URL"; then
+        log "Error: Failed to update TV tag. Original file kept."
+        rm -f "$TEMP_FILE"
+        return
+    fi
 
     if [ -s "$TEMP_FILE" ]; then
         mv "$TEMP_FILE" "$MERGED_FILE"
@@ -570,32 +731,31 @@ fix_tv_tag() {
 
 filter_merged() {
     local PATTERNS_FILE="$BASEPATH/filter_epg_patterns"
-    local MERGED_FILE="$BASEPATH/merged.xmltv"
     if [ ! -f "$PATTERNS_FILE" ]; then
-         log "No filter patterns file found at $PATTERNS_FILE. Skipping filtering of merged file."
-         return
+        log "No filter patterns file found at $PATTERNS_FILE. Skipping filtering of merged file."
+        return
     fi
 
     if [ -f "$MERGED_FILE" ]; then
         log "Filtering $MERGED_FILE using patterns from $PATTERNS_FILE..."
         while IFS= read -r pattern || [ -n "$pattern" ]; do
-             [[ "$pattern" =~ ^[[:space:]]*# ]] && continue
-             [ -z "$pattern" ] && continue
-             log "Removing pattern: $pattern"
-             local escaped_pattern
-             escaped_pattern=$(escape_sed_pattern "$pattern")
-             sed_inplace "/<title/ s|$escaped_pattern||g" "$MERGED_FILE"
-             sed_inplace "/<desc/ s|$escaped_pattern||g" "$MERGED_FILE"
+            pattern="$(trim_config_value "$pattern")"
+            [[ "$pattern" =~ ^# ]] && continue
+            [ -z "$pattern" ] && continue
+            log "Removing pattern: $pattern"
+            local escaped_pattern
+            escaped_pattern=$(escape_sed_pattern "$pattern")
+            sed_inplace "/<title/ s|$escaped_pattern||g" "$MERGED_FILE"
+            sed_inplace "/<desc/ s|$escaped_pattern||g" "$MERGED_FILE"
         done < "$PATTERNS_FILE"
     else
-      log "Merged file $MERGED_FILE not found for filtering."
+        log "Merged file $MERGED_FILE not found for filtering."
     fi
 }
 
 filter_by_cutoff_date() {
     local cutoff_date="$1"
-    local MERGED_FILE="$BASEPATH/merged.xmltv"
-    local TEMP_FILE="$BASEPATH/merged.temp.xmltv"
+    local TEMP_FILE="$RUN_WORKDIR/merged.temp.xmltv"
 
     if [ ! -f "$MERGED_FILE" ]; then
         log "Merged file $MERGED_FILE not found for cutoff date filtering."
@@ -604,50 +764,37 @@ filter_by_cutoff_date() {
 
     log "Applying cutoff date $cutoff_date to $MERGED_FILE..."
 
-    awk -v cutoff="$cutoff_date" '
-    BEGIN { in_prog = 0; keep_prog = 1; buffer = ""; }
-    /<programme / {
-        in_prog = 1;
-        start_attr_line = $0;
-        if (match(start_attr_line, /start="[0-9]{8}/)) {
-            start_date = substr(start_attr_line, RSTART + 7, 8);
-            if (start_date > cutoff) {
-                keep_prog = 0;
-                buffer = "";
-            } else {
-                keep_prog = 1;
-                buffer = $0 ORS;
-            }
-        } else {
-            keep_prog = 1;
-            buffer = $0 ORS;
+    if ! perl -MXML::LibXML -e '
+        use strict;
+        use warnings;
+
+        my ($file, $out, $cutoff) = @ARGV;
+        my $parser = XML::LibXML->new(no_blanks => 0);
+        my $doc = $parser->parse_file($file);
+        my $root = $doc->documentElement;
+        die "Root element is not <tv>\n" unless $root && $root->nodeName eq "tv";
+
+        for my $programme ($root->findnodes(".//programme")) {
+            my $start = $programme->getAttribute("start");
+            next unless defined $start && $start =~ /^([0-9]{8})/;
+            next unless $1 gt $cutoff;
+            $programme->parentNode->removeChild($programme);
         }
-        next;
-    }
-    /<\/programme>/ {
-        if (in_prog && keep_prog) {
-            buffer = buffer $0 ORS;
-            printf "%s", buffer;
-        }
-        in_prog = 0;
-        keep_prog = 1;
-        buffer = "";
-        next;
-    }
-    {
-        if (in_prog && keep_prog) {
-            buffer = buffer $0 ORS;
-        } else if (!in_prog) {
-            print $0;
-        }
-    }
-    ' "$MERGED_FILE" > "$TEMP_FILE"
+
+        open my $fh, ">:encoding(UTF-8)", $out or die "Cannot write $out: $!\n";
+        print {$fh} $doc->toString(1);
+        close $fh;
+    ' "$MERGED_FILE" "$TEMP_FILE" "$cutoff_date"; then
+        log "Error: XML cutoff filtering failed. Original file kept."
+        rm -f "$TEMP_FILE"
+        return
+    fi
 
     if [ -s "$TEMP_FILE" ]; then
         mv "$TEMP_FILE" "$MERGED_FILE"
         log "Cutoff date filtering complete."
     else
-        log "Error: awk filtering produced an empty file. Original file kept."
+        log "Error: XML cutoff filtering produced an empty file. Original file kept."
         rm -f "$TEMP_FILE"
     fi
 }
@@ -660,12 +807,23 @@ backup_existing_merged() {
         rm -f "$backup_file"
     fi
 
-    if [ -f "$BASEPATH/merged.xmltv" ]; then
+    if [ -f "$FINAL_MERGED_FILE" ]; then
         log "Creating a new backup for merged.xmltv..."
-        mv "$BASEPATH/merged.xmltv" "$backup_file"
+        mv "$FINAL_MERGED_FILE" "$backup_file"
     else
         log "No existing merged.xmltv to back up."
     fi
+}
+
+publish_merged() {
+    if [ ! -s "$MERGED_FILE" ]; then
+        log "Error: Merged file $MERGED_FILE not found or empty. Nothing to publish."
+        return 1
+    fi
+
+    backup_existing_merged
+    log "Publishing final merged.xmltv..."
+    mv "$MERGED_FILE" "$FINAL_MERGED_FILE"
 }
 
 main() {
@@ -706,7 +864,7 @@ main() {
                      echo "Error: Cannot use -cutoff-date and -cutoff-days together." >&2
                      exit 1
                 fi
-                if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+                if [[ "${2:-}" =~ ^[1-9][0-9]*$ ]]; then
                     CUTOFF_DAYS="$2"
                     shift
                     shift
@@ -727,11 +885,11 @@ main() {
     log_header
 
     if [[ -n "$CUTOFF_DAYS" ]]; then
-        if date --version >/dev/null 2>&1 ; then
-             CUTOFF_DATE=$(date --date="+${CUTOFF_DAYS} days" +%Y%m%d)
+        if CUTOFF_DATE=$(date --date="+${CUTOFF_DAYS} days" +%Y%m%d 2>/dev/null); then
+             :
         else
-             if date -v+${CUTOFF_DAYS}d +%Y%m%d >/dev/null 2>&1 ; then
-                 CUTOFF_DATE=$(date -v+${CUTOFF_DAYS}d +%Y%m%d)
+             if CUTOFF_DATE=$(date -v+"${CUTOFF_DAYS}"d +%Y%m%d 2>/dev/null); then
+                 :
              else
                  echo "Error: Cannot determine correct syntax for date command to calculate future date." >&2
                  exit 1
@@ -740,13 +898,21 @@ main() {
         log "Calculated cutoff date: $CUTOFF_DATE (${CUTOFF_DAYS} days from today)"
     fi
 
+    if [[ -n "$CUTOFF_DATE" ]]; then
+        local today_val
+        today_val=$(date +%Y%m%d)
+        if [[ "$CUTOFF_DATE" < "$today_val" ]]; then
+            log "Warning: cutoff date $CUTOFF_DATE is in the past. All programmes may be removed."
+        fi
+    fi
+
     log "Starting EPG processing script..."
     debug_log "Flags: dummy=$DUMMY filter=$FILTER cutoff_date=${CUTOFF_DATE:-none}"
     debug_log "Config: logfile=$LOGFILE rotate_count=$LOG_ROTATE_COUNT default_lang=$DEFAULT_LANG"
     init_sed_mode
     check_dependencies
     load_sources
-    backup_existing_merged
+    init_workdir
 
     if [[ "$DUMMY" == true ]]; then
         dummycreator
@@ -771,6 +937,9 @@ main() {
         filter_by_cutoff_date "$CUTOFF_DATE"
     fi
 
+    publish_merged
+
+    trap - EXIT
     cleanup
     log "EPG processing complete!"
 }
