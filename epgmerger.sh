@@ -668,7 +668,7 @@ ensure_channels_in_merged() {
         }
 
         $root->appendChild($doc->createTextNode("\n")) unless $first_programme;
-        open my $fh, ">:encoding(UTF-8)", $out or die "Cannot write $out: $!\n";
+        open my $fh, ">:raw", $out or die "Cannot write $out: $!\n";
         print {$fh} $doc->toString(1);
         close $fh;
         print scalar(@missing), "\n";
@@ -711,7 +711,7 @@ fix_tv_tag() {
         $root->setAttribute("generator-info-name", $generator_name);
         $root->setAttribute("generator-info-url", $generator_url);
 
-        open my $fh, ">:encoding(UTF-8)", $out or die "Cannot write $out: $!\n";
+        open my $fh, ">:raw", $out or die "Cannot write $out: $!\n";
         print {$fh} $doc->toString(1);
         close $fh;
     ' "$MERGED_FILE" "$TEMP_FILE" "$GENERATOR_NAME" "$GENERATOR_URL"; then
@@ -781,7 +781,7 @@ filter_by_cutoff_date() {
             $programme->parentNode->removeChild($programme);
         }
 
-        open my $fh, ">:encoding(UTF-8)", $out or die "Cannot write $out: $!\n";
+        open my $fh, ">:raw", $out or die "Cannot write $out: $!\n";
         print {$fh} $doc->toString(1);
         close $fh;
     ' "$MERGED_FILE" "$TEMP_FILE" "$cutoff_date"; then
