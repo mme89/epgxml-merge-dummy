@@ -1,140 +1,254 @@
 # epgxml-merge-dummy
 
-The epgmerger.sh script is designed to process, merge, and manage Electronic Program Guide (EPG) XML files.
-It automates tasks such as downloading EPG files, generating dummy EPG entries, sorting, merging, and cleaning up temporary files.
+[![Last Commit](https://img.shields.io/github/last-commit/mme89/epgxml-merge-dummy?style=for-the-badge)](https://github.com/mme89/epgxml-merge-dummy)
+[![License](https://img.shields.io/github/license/mme89/epgxml-merge-dummy?style=for-the-badge)](https://github.com/mme89/epgxml-merge-dummy/blob/main/LICENSE)
 
-**Requirements**
+`epgmerger.sh` builds a single XMLTV/EPG file from remote URLs, local XMLTV files, optional dummy channels, and a few cleanup passes.
 
-- Linux with: `wget`, `xmltv` (tv_sort, tv_merge), `gzip`, `sed`, `awk`
-- Install on Debian/Ubuntu:
-  ```
-  sudo apt install wget xmltv gzip sed gawk
-  ```
-  Notes:
-  - `tv_sort` and `tv_merge` come with the `xmltv` package.
-  - On systems without GNU sed/awk, install them or adjust in-place edits accordingly.
+It is meant for small home-server or automation workflows where you want one reliable `merged.xmltv` output from several guide sources.
 
-## Features
+## What It Does
 
-- EPG File Management:
-  - Download EPG files from URLs or process local files specified in sources
-  - Extract and process compressed .gz EPG files
-  - Automatically sort and merge multiple EPG files
-  - If only one source is provided, it is copied to `merged.xmltv`
-  - Custom generator info: Set your own `generator-info-name` and `generator-info-url` in the merged output
-- Robust fetching and logging:
-  - Resilient downloads with retries and per-attempt logging (success/failed per try)
-  - Continues processing remaining sources even if some fail
-- Dummy EPG Creation:
-  - Generate a dummy EPG using channel definitions from dummy_channels (optional with -dummy flag)
-- Filter EPG Entries:
-  - Apply filtering to the merged EPG file using patterns from filter_epg_patterns (optional with -filter flag)
-  - Patterns are escaped for literal matching (special characters like `[`, `*`, `$` are treated as literal text)
-- Cutoff Date Filtering:
-  - Remove EPG entries starting after a specific date (optional with -cutoff-date or -cutoff-days flags)
-- Channel Consistency:
-  - Ensures all `<programme>` channel references have corresponding `<channel id>` entries
-  - Any missing channel definitions are auto-added at the top, before the first programme
-- Configurable Language:
-  - Set default language code for EPG entries (defaults to "de")
-- Logging:
-  - Log output is displayed in the terminal and written to a log file simultaneously
-  - Custom log file location can be specified with the LOGFILE environment variable
-  - In-script log rotation: keeps latest 5 logs by default (current + 4 backups) and adds a clear run separator
+- Downloads XMLTV sources from URLs listed in `sources`
+- Copies local XMLTV files listed in `sources`
+- Extracts `.gz` guide files
+- Sorts each guide with `tv_sort`
+- Merges guides with `tv_merge`
+- Optionally generates dummy guide entries from `dummy_channels`
+- Optionally removes literal text patterns from titles/descriptions
+- Optionally removes programmes after a cutoff date
+- Adds missing `<channel>` entries for referenced programme channels
+- Writes a final `merged.xmltv` and backs up the previous output
+- Uses a per-run temporary workspace so source files in the repo are not overwritten
 
-## Running the Script
+## Requirements
 
+The script requires:
+
+- `bash`
+- `wget`
+- `xmltv` (`tv_sort` and `tv_merge`)
+- `gzip` / `gunzip`
+- `sed`
+- `awk`
+- `mktemp`
+- `perl`
+- Perl module `XML::LibXML`
+
+Install on Debian/Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install wget xmltv gzip sed gawk perl libxml-libxml-perl
 ```
+
+Install on Alpine:
+
+```bash
+apk add wget xmltv gzip sed gawk perl perl-xml-libxml
+```
+
+## Quick Start
+
+1. Add one source per line to `sources`.
+
+```text
+https://example.com/guide.xml
+https://example.com/guide.xml.gz
+/absolute/path/to/local-guide.xml
+```
+
+1. Run the merger.
+
+```bash
+./epgmerger.sh
+```
+
+1. Use the generated output.
+
+```text
+merged.xmltv
+```
+
+## Usage
+
+```bash
 ./epgmerger.sh [OPTION]
 ```
 
-Examples
+Common examples:
 
-```
-# Basic run using entries from the sources file
+```bash
+# Merge all configured sources
 ./epgmerger.sh
 
-# Generate dummy channels from dummy_channels and filter titles/descriptions
-./epgmerger.sh -dummy -filter
+# Include dummy channels
+./epgmerger.sh -dummy
 
-# Keep programmes only up to a fixed date
+# Apply title/description text filtering
+./epgmerger.sh -filter
+
+# Keep programmes up to and including a fixed date
 ./epgmerger.sh -cutoff-date 20251231
 
-# Keep programmes only up to N days from today
+# Keep programmes up to N days from today
 ./epgmerger.sh -cutoff-days 7
+
+# Combine options
+./epgmerger.sh -dummy -filter -cutoff-days 7
 ```
 
 ## Options
 
-- `-dummy`: Generate dummy EPG using dummy_channels
-- `-filter`: Apply filtering to the merged EPG file using patterns from filter_epg_patterns
-- `-cutoff-date YYYYMMDD`: Remove programme entries starting after this date (e.g., 20241231). Cannot be used with -cutoff-days.
-- `-cutoff-days N`: Remove programme entries starting N days after today. Cannot be used with -cutoff-date.
-- `--help`: Show help information
+| Option | Description |
+| --- | --- |
+| `--help` | Show built-in help and exit. |
+| `-dummy` | Generate dummy EPG entries from `dummy_channels`. |
+| `-filter` | Remove literal patterns from `<title>` and `<desc>` text using `filter_epg_patterns`. |
+| `-cutoff-date YYYYMMDD` | Remove programmes starting after this date. Cannot be combined with `-cutoff-days`. |
+| `-cutoff-days N` | Remove programmes starting after N days from today. `N` must be a positive integer. Cannot be combined with `-cutoff-date`. |
+
+If `-cutoff-date` is in the past, the script logs a warning because most or all programmes may be removed.
+
+## Configuration Files
+
+All configuration files live next to `epgmerger.sh`. Blank lines and comments are ignored. Leading/trailing whitespace and CRLF line endings are handled.
+
+### `sources`
+
+One source per line. Sources can be HTTP(S) URLs or local file paths.
+
+```text
+# Remote XMLTV
+https://example.com/guide-a.xml
+https://example.com/guide-b.xml.gz
+
+# Local XMLTV
+/srv/epg/local-guide.xml
+```
+
+Remote downloads are retried according to the `WGET_*` environment variables. Failed sources are skipped with a warning so other sources can still be processed.
+
+### `dummy_channels`
+
+Used only with `-dummy`.
+
+Format:
+
+```text
+channel-id|channel-name|program-title|program-description
+```
+
+Example:
+
+```text
+DemoChannel|Demo Channel|No guide data|Placeholder programme
+```
+
+Dummy channel fields are XML-escaped before output.
+
+### `filter_epg_patterns`
+
+Used only with `-filter`.
+
+Each non-empty, non-comment line is removed literally from `<title>` and `<desc>` lines in the merged output.
+
+```text
+(lang=)
+dummy
+```
+
+Patterns are treated as literal text, not regular expressions.
 
 ## Environment Variables
 
-- `GENERATOR_NAME`: Set custom generator name in merged EPG file (default: "epgxml-merge-dummy")
-- `GENERATOR_URL`: Set custom generator URL in merged EPG file (default: "https://github.com/mme89/epgxml-merge-dummy")
-- `DEFAULT_LANG`: Set default language code for EPG entries (default: "de")
-- `LOGFILE`: Specify a custom log file location (default: `<script_dir>/log/epgmerger.log`)
-- `LOG_ROTATE_COUNT`: Number of rotated backups to keep (default: 4). Total kept logs = current + this number.
-- `DEBUG`: Enable debug logging (set to "true" to enable)
-- Download retry tuning (defaults shown):
-  - `WGET_TRIES` (3): Number of attempts per source
-  - `WGET_WAIT` (5): Seconds to wait between attempts
-  - `WGET_CONNECT_TIMEOUT` (10): Connection timeout seconds
-  - `WGET_READ_TIMEOUT` (20): Read timeout seconds
-  - `WGET_DNS_TIMEOUT` (10): DNS resolution timeout seconds
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GENERATOR_NAME` | `epgxml-merge-dummy` | Value written to `generator-info-name` on the root `<tv>` element. |
+| `GENERATOR_URL` | `https://github.com/mme89/epgxml-merge-dummy` | Value written to `generator-info-url` on the root `<tv>` element. |
+| `DEFAULT_LANG` | `de` | Language code used for generated or repaired XMLTV elements. |
+| `LOGFILE` | `<script_dir>/log/epgmerger.log` | Log file path. Logs also print to stdout. |
+| `LOG_ROTATE_COUNT` | `4` | Number of rotated backups to keep. Set to `0` to disable rotated backups. |
+| `DEBUG` | `false` | Enable debug logs with `true`, `1`, `yes`, or `on`. |
+| `WGET_TRIES` | `3` | Download attempts per remote source. Must be at least `1`. |
+| `WGET_WAIT` | `5` | Seconds between retry attempts. Must be `0` or greater. |
+| `WGET_CONNECT_TIMEOUT` | `10` | Download connection timeout in seconds. Must be at least `1`. |
+| `WGET_READ_TIMEOUT` | `20` | Download read timeout in seconds. Must be at least `1`. |
+| `WGET_DNS_TIMEOUT` | `10` | Download DNS timeout in seconds. Must be at least `1`. |
 
-Example override for a run:
+Example:
 
-```
+```bash
 GENERATOR_NAME="My EPG" DEFAULT_LANG="en" WGET_TRIES=5 ./epgmerger.sh
 ```
 
-## Sources file
+## Outputs
 
-Define your inputs in `sources` (one per line). Lines starting with `#` are comments.
+| File | Description |
+| --- | --- |
+| `merged.xmltv` | Final merged XMLTV output. |
+| `merged_backup.xmltv` | Previous `merged.xmltv`, moved aside when a new output is successfully published. |
+| `log/epgmerger.log` | Current log file, unless `LOGFILE` overrides it. |
+| `log/epgmerger.log.N` | Rotated log backups, controlled by `LOG_ROTATE_COUNT`. |
 
-Examples:
+Temporary files are created in a per-run directory under `${TMPDIR:-/tmp}` and removed at the end of a successful or failed run.
 
+## Processing Order
+
+1. Validate configuration and rotate logs.
+2. Load source definitions from `sources`.
+3. Create a temporary workspace.
+4. Generate dummy XML if `-dummy` is enabled.
+5. Download or copy configured sources.
+6. Extract `.gz` files.
+7. Normalize language attributes in staged XML files.
+8. Sort each XML file with `tv_sort`.
+9. Merge XML files with `tv_merge`.
+10. Add missing channel definitions using XML-aware parsing.
+11. Set root `<tv>` generator metadata.
+12. Apply optional text filtering.
+13. Apply optional cutoff date filtering.
+14. Publish `merged.xmltv` and clean up temporary files.
+
+## Notes
+
+- XML-aware post-processing uses `XML::LibXML`, so single-quoted attributes, multiline tags, and escaped XML values are handled correctly.
+- If a compressed source cannot be extracted, that source is dropped and the run continues.
+- If a source cannot be sorted or merged, the script logs a warning and continues with the remaining usable sources.
+- The final `merged.xmltv` is only published after processing succeeds, so a failed run should not replace the previous output.
+
+## Troubleshooting
+
+Check dependencies:
+
+```bash
+command -v tv_sort tv_merge wget gunzip perl
+perl -MXML::LibXML -e 1
 ```
-# Remote XMLTV files
-https://example.com/guide_a.xml
-https://example.com/guide_b.xml.gz
 
-# Local files
-/absolute/path/to/local_epg1.xml
-/absolute/path/to/local_epg2.xml
+Run with debug logging:
+
+```bash
+DEBUG=true ./epgmerger.sh
 ```
 
-## File Structure
+Show built-in help:
 
-- `sources`: List of EPG file sources (URLs or local file paths)
-- `dummy_channels`: Definitions for dummy EPG channels and programs
-- `filter_epg_patterns`: Patterns to filter out from the merged EPG file
-- `merged.xmltv`: The final merged EPG file
-- `merged_backup.xmltv`: Backup of the most recent merged EPG
-- `epgmerger.log`: Default log file (unless specified otherwise)
+```bash
+./epgmerger.sh --help
+```
 
-## Output details
+## Note
 
-- `merged.xmltv` is produced at the repository root
-- During processing:
-  - Sources are downloaded or copied locally, extracted if `.gz`, then sorted per channel
-  - Files are merged incrementally using `tv_merge`
-  - The `<tv>` tag is replaced with custom generator info (configurable via `GENERATOR_NAME` and `GENERATOR_URL`)
-  - Any missing `<channel>` definitions for referenced programmes are added at the top
-  - Optional filtering and cutoff-date pruning are applied
-  - Temporary files are cleaned up automatically
-  - Logs are rotated at the start of each run:
-    - `epgmerger.log` (current), `epgmerger.log.1`, `epgmerger.log.2`, ... up to `LOG_ROTATE_COUNT`
-    - Each run begins with a separator and timestamped header
+This project was created with the assistance of AI.
 
-##
+## Contributing
 
-This script combines two repos from yurividal
+Contributions are welcome! Feel free to open issues or submit pull requests.
 
-- [mergexmlepg](https://github.com/yurividal/mergexmlepg)
-- [dummyepgxml](https://github.com/yurividal/dummyepgxml)
+## Credits
+
+This project combines ideas from:
+
+- [yurividal/mergexmlepg](https://github.com/yurividal/mergexmlepg)
+- [yurividal/dummyepgxml](https://github.com/yurividal/dummyepgxml)
